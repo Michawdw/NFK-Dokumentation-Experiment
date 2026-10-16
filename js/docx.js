@@ -1,0 +1,620 @@
+/* docx.js – gemeinsamer Baukasten für alle Word-Dokumente der App.
+   Baut den OOXML-ZIP-Container komplett selbst per JSZip (keine Word-Bibliothek,
+   keine Vorlage). Dadurch sind variable Text-, Bild- und Abschnittsmengen möglich.
+   Genutzt von js/protokoll.js (Vorprüfungsprotokoll) und js/behinderung.js
+   (Baubehinderungsanzeige). Ergebnis öffnet in Microsoft Word und Google Docs.
+
+   Benutzung:
+     const doc = Docx.create();
+     await doc.logo();                       // Firmenlogo (assets/logo.png)
+     doc.push(Docx.pTitle('Überschrift'));
+     await doc.image(blob, { ext: 'jpeg' }); // Foto, auf 15 cm Breite begrenzt
+     const blob = await doc.toBlob();
+
+   Maßeinheiten: EMU (914400 pro Zoll) für Bilder, half-points für Schriftgrößen,
+   Twips (1/20 pt) für Seitenränder.
+*/
+const Docx = (() => {
+  const MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  const EMU_PER_PX = 9525;          // 914400 EMU/Zoll ÷ 96 dpi
+  const EMU_PER_CM = 360000;
+  const MAX_W_EMU = 15 * EMU_PER_CM; // 15 cm maximale Bildbreite (A4, ~2 cm Rand)
+  const LOGO_URL = 'assets/logo.png';
+  const LOGO_W_EMU = 4.5 * EMU_PER_CM;
+
+  let logoBlobCache = null; // Logo nur einmal je Sitzung laden
+
+  // ---- XML-Helfer ----
+  // Entfernt Zeichen, die XML 1.0 nicht zulässt. Ohne diesen Schritt macht ein einziges
+  // Steuerzeichen die fertige Datei unlesbar („Die Datei ist beschädigt"): Shift+Enter in
+  // Word/Outlook erzeugt U+000B, und dieses Zeichen überlebt Copy&Paste in die Freitextfelder
+  // (Tätigkeiten, Behinderungsgrund, Bildunterschrift). Betrifft .docx wie .xlsx, deshalb
+  // wird die Funktion auch von bautagebuch.js genutzt.
+  // Tab, Zeilenumbruch und Wagenrücklauf bleiben erlaubt; gültige Emoji-Paare bleiben
+  // erhalten, einzelne Surrogat-Hälften werden verworfen.
+  function xmlSauber(s) {
+    const t = String(s == null ? '' : s);
+    let out = '';
+    for (let i = 0; i < t.length; i++) {
+      const c = t.charCodeAt(i);
+      if (c >= 0xD800 && c <= 0xDBFF) {          // erste Hälfte eines Paares
+        const n = t.charCodeAt(i + 1);
+        if (n >= 0xDC00 && n <= 0xDFFF) { out += t[i] + t[i + 1]; i++; }
+        continue;                                 // ohne Partner: verwerfen
+      }
+      if (c >= 0xDC00 && c <= 0xDFFF) continue;   // verwaiste zweite Hälfte
+      if (c === 0x09 || c === 0x0A || c === 0x0D) { out += t[i]; continue; }
+      if (c < 0x20) continue;                     // übrige Steuerzeichen, u. a. U+000B
+      if (c === 0xFFFE || c === 0xFFFF) continue;
+      out += t[i];
+    }
+    return out;
+  }
+
+  const escapeXml = (s) => xmlSauber(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const escapeAttr = (s) => escapeXml(s).replace(/"/g, '&quot;');
+
+  // Pixelmaße eines Bild-Blobs (bevorzugt createImageBitmap, sonst Image-Fallback).
+  async function imageSizePx(blob) {
+    if (typeof createImageBitmap === 'function') {
+      try {
+        const bmp = await createImageBitmap(blob);
+        const s = { w: bmp.width, h: bmp.height };
+        bmp.close();
+        return s;
+      } catch (e) { /* Fallback unten */ }
+    }
+    return await new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve({ w: img.naturalWidth, h: img.naturalHeight }); };
+      img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+      img.src = url;
+    });
+  }
+
+  // Pixelmaße -> EMU. widthEmu erzwingt eine feste Breite (z. B. Logo),
+  // sonst wird nur auf maxWidthEmu heruntergerechnet; optional zusätzlich auf
+  // maxHeightEmu begrenzt (z. B. damit Hochkantfotos nicht fast eine ganze Seite
+  // füllen). Seitenverhältnis bleibt in jedem Fall erhalten.
+  function emuSize(px, opts) {
+    const o = opts || {};
+    const w = Math.max(1, px.w), h = Math.max(1, px.h);
+    if (o.widthEmu) {
+      return { cx: Math.round(o.widthEmu), cy: Math.round(o.widthEmu * h / w) };
+    }
+    let cx = w * EMU_PER_PX;
+    let cy = h * EMU_PER_PX;
+    const maxW = o.maxWidthEmu || MAX_W_EMU;
+    if (cx > maxW) { cy = cy * maxW / cx; cx = maxW; }
+    if (o.maxHeightEmu && cy > o.maxHeightEmu) { cx = cx * o.maxHeightEmu / cy; cy = o.maxHeightEmu; }
+    return { cx: Math.round(cx), cy: Math.round(cy) };
+  }
+
+  // ---- Absatz-Bausteine ----
+  // Mehrzeiliger Text: an \n splitten, Segmente mit <w:br/> verbinden, alles in EINEM w:r.
+  function runText(str) {
+    const parts = String(str == null ? '' : str).replace(/\r\n?/g, '\n').split('\n');
+    return parts.map((p) => `<w:t xml:space="preserve">${escapeXml(p)}</w:t>`).join('<w:br/>');
+  }
+  const pPr = (align, extra) =>
+    (align || extra) ? `<w:pPr>${align ? `<w:jc w:val="${align}"/>` : ''}${extra || ''}</w:pPr>` : '';
+
+  const pText = (str) => `<w:p><w:r>${runText(str)}</w:r></w:p>`;
+  const pBold = (str) => `<w:p><w:r><w:rPr><w:b/></w:rPr>${runText(str)}</w:r></w:p>`;
+  const pEmpty = () => '<w:p/>';
+  // Kopfzeile „Label: Wert" – Label fett, Wert normal.
+  const pHead = (label, val) =>
+    `<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${escapeXml(label)}: </w:t></w:r>` +
+    `<w:r>${runText(val)}</w:r></w:p>`;
+  // Überschrift größer (32 half-points = 16 pt, fett).
+  const pTitle = (str) =>
+    `<w:p><w:r><w:rPr><w:b/><w:sz w:val="32"/></w:rPr>${runText(str)}</w:r></w:p>`;
+  // Rechtsbündiger Absatz (z. B. „Ort, den Datum").
+  const pRight = (str) =>
+    `<w:p>${pPr('right')}<w:r>${runText(str)}</w:r></w:p>`;
+  // Kleiner Text, eng gesetzt (Absenderzeile über dem Anschriftenfeld).
+  const pSmall = (str) =>
+    `<w:p>${pPr(null, '<w:spacing w:after="0"/>')}<w:r><w:rPr><w:sz w:val="16"/></w:rPr>${runText(str)}</w:r></w:p>`;
+  // Absatz ohne Abstand nach unten – für zusammenhängende Adressblöcke.
+  const pTight = (str) =>
+    `<w:p>${pPr(null, '<w:spacing w:after="0"/>')}<w:r>${runText(str)}</w:r></w:p>`;
+  const pPageBreak = () => '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+
+  // Absatz mit frei wählbarer Schrift: { bold, italic, color:'RRGGBB', sz (half-points),
+  // align, after (Abstand danach in Twips) }. Grundlage für die gestalteten Berichte.
+  function pStyled(str, o) {
+    const s = o || {};
+    const rPr = (s.bold ? '<w:b/>' : '') + (s.italic ? '<w:i/>' : '')
+      + (s.color ? `<w:color w:val="${s.color}"/>` : '') + (s.sz ? `<w:sz w:val="${s.sz}"/>` : '');
+    const sp = (s.before != null ? ` w:before="${s.before}"` : '') + (s.after != null ? ` w:after="${s.after}"` : '');
+    const extra = (sp ? `<w:spacing${sp}/>` : '')
+      + (s.keepNext ? '<w:keepNext/>' : '');
+    return `<w:p>${pPr(s.align, extra)}<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}${runText(str)}</w:r></w:p>`;
+  }
+
+  // Sprungmarke (Textmarke) um ein Stück Absatzinhalt – Ziel für hyperlinkRun(). Namen
+  // müssen mit einem Buchstaben beginnen und dürfen keine Leerzeichen enthalten (z. B. „P3_4").
+  let bookmarkSeq = 0;
+  const bookmark = (name, inhalt) => {
+    if (!name) return inhalt;
+    const id = ++bookmarkSeq;
+    return `<w:bookmarkStart w:id="${id}" w:name="${escapeAttr(name)}"/>${inhalt}<w:bookmarkEnd w:id="${id}"/>`;
+  };
+  // Interner Link auf eine Textmarke – Word und das daraus erzeugte PDF springen beim Klick hin.
+  const hyperlinkRun = (anker, runXml) =>
+    anker ? `<w:hyperlink w:anchor="${escapeAttr(anker)}" w:history="1">${runXml}</w:hyperlink>` : runXml;
+
+  // Farbiger Abschnitts-Balken über die ganze Textbreite (Absatzschattierung), weiße
+  // fette Schrift. keepNext hält ihn mit dem folgenden Inhalt auf einer Seite.
+  // anker (optional): Textmarke, auf die z. B. eine Übersichtstabelle verlinken kann.
+  const pBar = (str, fill, anker) =>
+    `<w:p><w:pPr><w:keepNext/><w:shd w:val="clear" w:color="auto" w:fill="${fill || '1F4E78'}"/>` +
+    '<w:spacing w:before="280" w:after="120"/></w:pPr>' +
+    bookmark(anker, `<w:r><w:rPr><w:b/><w:color w:val="FFFFFF"/><w:sz w:val="26"/></w:rPr>${runText(' ' + str)}</w:r>`) + '</w:p>';
+
+  // Setzt <w:keepNext/> in jeden Absatz eines XML-Stücks (ohneLetzten: den letzten Absatz
+  // auslassen). Vorhandene keepNext werden vorher entfernt, damit keiner doppelt steht.
+  // Einfügen direkt am Anfang von w:pPr ist schema-konform (keepNext folgt nur pStyle).
+  // Zusätzlich überall <w:keepLines/> („Diese Zeilen nicht trennen"), auch im letzten Absatz:
+  // Mehrzeiliger Text (Zeilenumbrüche per <w:br/>) ist EIN Absatz – ohne keepLines teilte
+  // Word ihn mittendrin, keepNext war damit erfüllt und der Abschnitt riss trotz
+  // Zusammenhalten über die Seite (Wochenbericht „Noch offen", bis v58).
+  function keepNextXml(xml, ohneLetzten) {
+    const sauber = String(xml).replace(/<w:keepNext\/>|<w:keepLines\/>/g, '');
+    const gesamt = (sauber.match(/<w:p\/>|<w:p>/g) || []).length;
+    let n = 0;
+    return sauber.replace(/<w:p\/>|<w:p>(<w:pPr>)?/g, (m, ppr) => {
+      n++;
+      const tags = (ohneLetzten && n === gesamt) ? '<w:keepLines/>' : '<w:keepNext/><w:keepLines/>';
+      if (m === '<w:p/>') return `<w:p><w:pPr>${tags}</w:pPr></w:p>`;
+      return ppr ? `<w:p><w:pPr>${tags}` : `<w:p><w:pPr>${tags}</w:pPr>`;
+    });
+  }
+
+  // Tabelle mit dünnem grauen Gitter. rows: [{ header?, cells: [{ text | xml, fill, bold,
+  // color, sz, align, anker }] }], widths: Spaltenbreiten in Twips (Summe = Textbreite 9638).
+  // Kopfzeilen wiederholen sich auf jeder Seite (tblHeader). anker: Text verlinkt auf diese
+  // Textmarke (Aussehen bleibt gleich).
+  function table(rows, widths) {
+    const total = widths.reduce((a, b) => a + b, 0);
+    const line = (s) => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="BFC5CC"/>`;
+    const borders = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(line).join('');
+    const cellPara = (c) => {
+      const rPr = (c.bold ? '<w:b/>' : '') + (c.color ? `<w:color w:val="${c.color}"/>` : '')
+        + (c.sz ? `<w:sz w:val="${c.sz}"/>` : '');
+      return `<w:p>${pPr(c.align, '<w:spacing w:before="40" w:after="40"/>')}` +
+        hyperlinkRun(c.anker, `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}${runText(c.text)}</w:r>`) + '</w:p>';
+    };
+    const tr = (r) => '<w:tr>' + (r.header ? '<w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>' : '<w:trPr><w:cantSplit/></w:trPr>') +
+      r.cells.map((c, i) =>
+        `<w:tc><w:tcPr><w:tcW w:w="${widths[i]}" w:type="dxa"/>` +
+        (c.fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${c.fill}"/>` : '') +
+        '<w:vAlign w:val="center"/></w:tcPr>' + (c.xml || cellPara(c)) + '</w:tc>').join('') + '</w:tr>';
+    return '<w:tbl><w:tblPr>' +
+      `<w:tblW w:w="${total}" w:type="dxa"/><w:tblLayout w:type="fixed"/>` +
+      `<w:tblBorders>${borders}</w:tblBorders>` +
+      '<w:tblCellMar><w:left w:w="100" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar>' +
+      '</w:tblPr>' +
+      `<w:tblGrid>${widths.map((w) => `<w:gridCol w:w="${w}"/>`).join('')}</w:tblGrid>` +
+      rows.map(tr).join('') + '</w:tbl>';
+  }
+
+  // Ein eingebettetes Bild als eigener Absatz.
+  function drawingParagraph(rid, seq, emu, align) {
+    return `<w:p>${pPr(align)}<w:r><w:drawing>` +
+      '<wp:inline distT="0" distB="0" distL="0" distR="0">' +
+      `<wp:extent cx="${emu.cx}" cy="${emu.cy}"/>` +
+      '<wp:effectExtent l="0" t="0" r="0" b="0"/>' +
+      `<wp:docPr id="${seq}" name="Bild ${seq}"/>` +
+      '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' +
+      '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+      `<pic:pic><pic:nvPicPr><pic:cNvPr id="${seq}" name="Bild ${seq}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+      `<pic:blipFill><a:blip r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${emu.cx}" cy="${emu.cy}"/></a:xfrm>` +
+      '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
+      '</pic:pic></a:graphicData></a:graphic>' +
+      '</wp:inline></w:drawing></w:r></w:p>';
+  }
+
+  // Rahmenlose zweispaltige Tabelle für den Briefkopf: links die Absenderanschrift,
+  // rechts das Logo – beide oben bündig, damit nichts versetzt steht. Ohne Tabelle
+  // müssten Logo und Anschrift untereinander stehen (Absätze fließen nur vertikal).
+  // Breiten in Twips; Textbreite A4 = 11906 - 2*1134 Rand = 9638.
+  const TBL_W = 9638;
+  const COL_LEFT = 5400;
+  const COL_RIGHT = TBL_W - COL_LEFT;
+  const NO_BORDER = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+    .map((s) => `<w:${s} w:val="none" w:sz="0" w:space="0" w:color="auto"/>`).join('');
+
+  function twoColumnRow(leftXml, rightXml) {
+    const cell = (w, content) =>
+      `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:vAlign w:val="top"/></w:tcPr>` +
+      (content || '<w:p/>') + '</w:tc>';
+    return '<w:tbl>' +
+      '<w:tblPr>' +
+      `<w:tblW w:w="${TBL_W}" w:type="dxa"/>` +
+      '<w:tblLayout w:type="fixed"/>' +
+      `<w:tblBorders>${NO_BORDER}</w:tblBorders>` +
+      '<w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/>' +
+      '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>' +
+      '</w:tblPr>' +
+      `<w:tblGrid><w:gridCol w:w="${COL_LEFT}"/><w:gridCol w:w="${COL_RIGHT}"/></w:tblGrid>` +
+      `<w:tr>${cell(COL_LEFT, leftXml)}${cell(COL_RIGHT, rightXml)}</w:tr>` +
+      '</w:tbl>';
+  }
+
+  // ---- Feste Container-Teile ----
+  // Schrift-Grundeinstellung, damit das Dokument in Word, LibreOffice und Google Docs
+  // gleich aussieht (ohne styles.xml setzt jedes Programm seinen eigenen Standard).
+  const STYLES_XML =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    '<w:docDefaults>' +
+    '<w:rPrDefault><w:rPr>' +
+    '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/>' +
+    '<w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="de-DE"/>' +
+    '</w:rPr></w:rPrDefault>' +
+    '<w:pPrDefault><w:pPr>' +
+    '<w:spacing w:after="120" w:line="259" w:lineRule="auto"/>' +
+    '</w:pPr></w:pPrDefault>' +
+    '</w:docDefaults>' +
+    '</w:styles>';
+
+  // mitKopfFuss: Kopf-/Fußzeile einhängen, auf Seite 1 aber weglassen (titlePg ohne eigene
+  // „erste Seite"-Kopfzeile = leer) – dort stehen schon Briefkopf und Logo.
+  // Reihenfolge laut Schema: header/footerReference, pgSz, pgMar, …, titlePg.
+  const sectPr = (mitKopfFuss) =>
+    '<w:sectPr>' +
+    (mitKopfFuss ? '<w:headerReference w:type="default" r:id="rIdKopf"/><w:footerReference w:type="default" r:id="rIdFuss"/>' : '') +
+    '<w:pgSz w:w="11906" w:h="16838"/>' +
+    '<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"' +
+    ' w:header="567" w:footer="567" w:gutter="0"/>' +
+    (mitKopfFuss ? '<w:titlePg/>' : '') + '</w:sectPr>';
+
+  const contentTypes = (mitKopfFuss) =>
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Default Extension="jpeg" ContentType="image/jpeg"/>' +
+    '<Default Extension="png" ContentType="image/png"/>' +
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' +
+    (mitKopfFuss
+      ? '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>' +
+        '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
+      : '') +
+    '</Types>';
+
+  // Kopfzeile: kleiner grauer Text mit feiner Linie darunter. Fußzeile rechts „Seite x von y"
+  // (Felder PAGE/NUMPAGES – Word rechnet sie beim Öffnen und beim PDF-Export aus).
+  const HF_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' +
+    ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  const HF_RPR = '<w:rPr><w:color w:val="5A6672"/><w:sz w:val="18"/></w:rPr>';
+  const headerXml = (text) =>
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr ${HF_NS}>` +
+    '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="4" w:space="4" w:color="BFC5CC"/></w:pBdr>' +
+    `<w:spacing w:after="0"/></w:pPr><w:r>${HF_RPR}${runText(text)}</w:r></w:p></w:hdr>`;
+  const feld = (instr) =>
+    `<w:fldSimple w:instr=" ${instr} "><w:r>${HF_RPR}<w:t>1</w:t></w:r></w:fldSimple>`;
+  const FOOTER_XML =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr ${HF_NS}>` +
+    '<w:p><w:pPr><w:spacing w:after="0"/><w:jc w:val="right"/></w:pPr>' +
+    `<w:r>${HF_RPR}<w:t xml:space="preserve">Seite </w:t></w:r>${feld('PAGE')}` +
+    `<w:r>${HF_RPR}<w:t xml:space="preserve"> von </w:t></w:r>${feld('NUMPAGES')}</w:p></w:ftr>`;
+
+  // ---- Karte (Wochenbericht): ein Punkt als umrahmter Kasten ----
+  // Gitter 3 Spalten: zwei Fotospalten à halbe Breite, die rechte geteilt für das Status-Feld
+  // im Kopf. Hochkantfotos stehen zu zweit, Querformate (und ein einzelnes Hochkantfoto)
+  // über die volle Breite – so wird jedes Foto so groß, wie sein Format es zulässt.
+  const KARTE_G = [4819, 3919, 900];
+  const KARTE_LINIE = 'BFC5CC';
+  const FOTO_HOCH = { ext: 'jpeg', maxWidthEmu: 7.8 * EMU_PER_CM, maxHeightEmu: 10 * EMU_PER_CM, align: 'center' };
+  const FOTO_QUER = { ext: 'jpeg', maxWidthEmu: 15.5 * EMU_PER_CM, maxHeightEmu: 10 * EMU_PER_CM, align: 'center' };
+  // Höhe eines Textabsatzes in cm (an echten Berichten nachgemessen: 0,47 je Zeile).
+  const textCm = (t) => 0.47 * String(t || '').split(/\r?\n/)
+    .reduce((n, z) => n + Math.max(1, Math.ceil(z.length / 95)), 0) + 0.13;
+
+  const ROOT_RELS =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+    '</Relationships>';
+
+  // ---- Dokument-Builder ----
+  function create() {
+    const body = [];   // Absatz-XML
+    const media = [];  // { rid, file, blob }
+    let relSeq = 1;    // rId1 ist für styles.xml reserviert -> Bilder ab rId2
+    let imgSeq = 0;    // laufende Bildnummer (Dateiname + docPr/cNvPr id)
+    let kopfText = null; // gesetzt per kopfFuss() -> Kopf-/Fußzeile ab Seite 2
+
+    const api = {
+      // Ein oder mehrere fertige Absatz-XML-Strings anhängen (null/'' wird ignoriert).
+      push(...xml) {
+        for (const x of xml) {
+          if (Array.isArray(x)) api.push(...x);
+          else if (x) body.push(x);
+        }
+        return api;
+      },
+
+      // Bild registrieren und den fertigen Bildabsatz als XML zurückgeben (ohne ihn
+      // anzuhängen) – nötig, damit Bilder auch in Tabellenzellen landen können.
+      // opts: { ext:'jpeg'|'png', widthEmu, maxWidthEmu, maxHeightEmu, align }
+      async imageXml(blob, opts) {
+        const o = opts || {};
+        const ext = o.ext || 'jpeg';
+        imgSeq++;
+        relSeq++;
+        const rid = 'rId' + relSeq;
+        const file = `image${imgSeq}.${ext}`;
+        media.push({ rid, file, blob });
+
+        let emu;
+        try {
+          emu = emuSize(o.px || await imageSizePx(blob), o);   // o.px: schon ermittelte Pixelmaße
+        } catch (e) {
+          // 4:3-Fallback, wenn die Pixelmaße nicht ermittelbar sind.
+          const cx = o.widthEmu || o.maxWidthEmu || MAX_W_EMU;
+          emu = { cx: Math.round(cx), cy: Math.round(cx * 3 / 4) };
+        }
+        return drawingParagraph(rid, imgSeq, emu, o.align);
+      },
+
+      // Bild als eigener Absatz einbetten. Zusätzlich zu imageXml: opts.caption
+      async image(blob, opts) {
+        const o = opts || {};
+        body.push(await api.imageXml(blob, o));
+        if (o.caption && String(o.caption).trim()) body.push(pText(o.caption));
+        return api;
+      },
+
+      // Firmenlogo (assets/logo.png) als Absatz-XML – dieselbe Grafik wie im Bautagebuch.
+      // Liefert '' , wenn die Datei fehlt: das Dokument entsteht dann eben ohne Logo.
+      async logoXml(opts) {
+        const o = opts || {};
+        try {
+          if (!logoBlobCache) {
+            const resp = await fetch(LOGO_URL);
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            logoBlobCache = await resp.blob();
+          }
+          return await api.imageXml(logoBlobCache, {
+            ext: 'png',
+            widthEmu: o.widthEmu || LOGO_W_EMU,
+            align: o.align || 'right',
+          });
+        } catch (e) {
+          console.warn('Logo konnte nicht eingebettet werden:', e);
+          return '';
+        }
+      },
+
+      // Briefkopf: Absenderanschrift links, Logo rechts – oben bündig auf einer Höhe.
+      // addressXml: Array fertiger Absatz-XML-Strings (z. B. Docx.pTight(...)).
+      async letterhead(addressXml, opts) {
+        const left = (addressXml || []).filter(Boolean).join('');
+        const right = await api.logoXml(opts);
+        body.push(twoColumnRow(left, right));
+        return api;
+      },
+
+      // Zusammenhalten auf einer Seite: mark() merkt sich die aktuelle Position im Dokument,
+      // keepTogether(von, bis) setzt auf allen Absätzen dazwischen „Absatz mit nächstem
+      // zusammenhalten" (auch in Tabellenzellen – so hält Word auch Tabellenzeilen
+      // zusammen). Der letzte Absatz bleibt frei, sonst hinge der Block am nächsten.
+      // Passt der Block nicht mehr auf die Seite, beginnt Word ihn auf einer neuen.
+      mark() { return body.length; },
+      keepTogether(von, bis) {
+        const ende = bis == null ? body.length : bis;
+        for (let i = von; i < ende; i++) body[i] = keepNextXml(body[i], i === ende - 1);
+        return api;
+      },
+      // „Seitenumbruch oberhalb" für den Absatz an Position i (aus mark()). Steht er schon
+      // oben auf einer Seite, fügt Word keine Leerseite ein. Reihenfolge in w:pPr laut Schema:
+      // keepNext, keepLines, pageBreakBefore – daher hinter vorhandene keep*-Tags.
+      pageBreakBefore(i) {
+        body[i] = body[i].replace(/^<w:p><w:pPr>((?:<w:keepNext\/>)?(?:<w:keepLines\/>)?)/,
+          '<w:p><w:pPr>$1<w:pageBreakBefore/>');
+        return api;
+      },
+
+      // Fotos zwei pro Zeile, je mit Bildunterschrift darunter – rahmenlose Tabelle.
+      // items: [{ blob, caption }]. Hochkantfotos werden in der Höhe begrenzt, damit eine
+      // Zeile nicht die halbe Seite füllt.
+      async photoGrid(items) {
+        const list = (items || []).filter((x) => x && x.blob);
+        if (!list.length) return api;
+        const COL = Math.floor(TBL_W / 2);
+        const imgOpts = { ext: 'jpeg', maxWidthEmu: 8 * EMU_PER_CM, maxHeightEmu: 6.5 * EMU_PER_CM, align: 'center' };
+        const cell = async (it) => {
+          if (!it) return '<w:tc><w:tcPr><w:tcW w:w="' + COL + '" w:type="dxa"/></w:tcPr><w:p/></w:tc>';
+          const img = await api.imageXml(it.blob, imgOpts);
+          const cap = (it.caption && String(it.caption).trim())
+            ? pStyled(it.caption, { sz: 18, color: '5A6672', align: 'center', after: 60 }) : '<w:p/>';
+          return `<w:tc><w:tcPr><w:tcW w:w="${COL}" w:type="dxa"/><w:vAlign w:val="top"/></w:tcPr>${img}${cap}</w:tc>`;
+        };
+        let rows = '';
+        for (let i = 0; i < list.length; i += 2) {
+          rows += '<w:tr><w:trPr><w:cantSplit/></w:trPr>' + await cell(list[i]) + await cell(list[i + 1]) + '</w:tr>';
+        }
+        body.push('<w:tbl><w:tblPr>' +
+          `<w:tblW w:w="${COL * 2}" w:type="dxa"/><w:tblLayout w:type="fixed"/>` +
+          `<w:tblBorders>${NO_BORDER}</w:tblBorders></w:tblPr>` +
+          `<w:tblGrid><w:gridCol w:w="${COL}"/><w:gridCol w:w="${COL}"/></w:tblGrid>` +
+          rows + '</w:tbl>');
+        body.push(pEmpty());   // Word verlangt nach einer Tabelle einen Absatz
+        return api;
+      },
+
+      // Ein Punkt als Karte: umrahmte Tabelle, graue Kopfzeile „nr  titel" + Status-Feld rechts,
+      // darunter der Inhalt. Hängt NICHT selbst an – liefert { xml: [tabelle, abstand], hoeheCm },
+      // damit der Aufrufer mit mark()/keepTogether() über den Umbruch entscheiden kann.
+      // o: { nr, titel, anker, status: { zeichen, color, fill }, inhalt: [
+      //      { text, stil }  – Absatz wie pStyled(text, stil)
+      //      { fotos: [{ blob, caption }] } ] }
+      // Die Kopfzeile wiederholt sich, falls eine sehr lange Karte doch umbrechen muss.
+      async card(o) {
+        const [g1, g2, g3] = KARTE_G;
+        const linie = `w:val="single" w:sz="4" w:space="0" w:color="${KARTE_LINIE}"`;
+        const tc = (w, span, inhalt, pr) => `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/>` +
+          (span > 1 ? `<w:gridSpan w:val="${span}"/>` : '') + (pr || '') + '</w:tcPr>' + inhalt + '</w:tc>';
+        const tr = (zellen, kopf) =>
+          `<w:tr><w:trPr><w:cantSplit/>${kopf ? '<w:tblHeader/>' : ''}</w:trPr>${zellen}</w:tr>`;
+        const st = o.status || {};
+        const kopfPr = (fill) => `<w:tcBorders><w:bottom ${linie}/></w:tcBorders>` +
+          `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/><w:vAlign w:val="center"/>`;
+        const kopfPara = '<w:p><w:pPr><w:spacing w:before="60" w:after="60"/></w:pPr>' + bookmark(o.anker,
+          `<w:r><w:rPr><w:b/><w:color w:val="1F4E78"/></w:rPr><w:t xml:space="preserve">${escapeXml(o.nr || '')}   </w:t></w:r>` +
+          `<w:r><w:rPr><w:b/><w:color w:val="1F4E78"/></w:rPr>${runText(o.titel)}</w:r>`) + '</w:p>';
+        const statusPara = `<w:p>${pPr('center', '<w:spacing w:before="60" w:after="60"/>')}` +
+          `<w:r><w:rPr><w:b/>${st.color ? `<w:color w:val="${st.color}"/>` : ''}<w:sz w:val="24"/></w:rPr>` +
+          `${runText(st.zeichen || '')}</w:r></w:p>`;
+        let rows = tr(tc(g1 + g2, 2, kopfPara, kopfPr('F3F6F9')) + tc(g3, 1, statusPara, kopfPr(st.fill || 'F3F6F9')), true);
+        let hoehe = 1.0;
+
+        // Aufeinanderfolgende Textabsätze teilen sich eine Zeile; Fotos bekommen eigene Zeilen.
+        let text = [];
+        const textZeile = () => {
+          if (!text.length) return;
+          const paras = text.map((x, i) => pStyled(x.text, Object.assign({}, x.stil,
+            i === 0 ? { before: 100 } : null)));
+          rows += tr(tc(g1 + g2 + g3, 3, paras.join('')));
+          hoehe += text.reduce((h, x) => h + textCm(x.text), 0.2);
+          text = [];
+        };
+        const fotoZelle = async (it, w, span, opts) => {
+          const img = await api.imageXml(it.blob, Object.assign({ px: it.px }, opts));
+          const cap = (it.caption && String(it.caption).trim())
+            ? pStyled(it.caption, { sz: 18, color: '5A6672', align: 'center', after: 80 }) : '<w:p/>';
+          return tc(w, span, img + cap, '<w:vAlign w:val="top"/>');
+        };
+        const bildCm = (it, opts) => emuSize(it.px, opts).cy / EMU_PER_CM;
+        const capCm = (...its) => (its.some((x) => x && x.caption && String(x.caption).trim()) ? 0.55 : 0.45);
+        for (const teil of o.inhalt || []) {
+          if (!teil.fotos) { text.push(teil); continue; }
+          textZeile();
+          const list = [];
+          for (const it of teil.fotos.filter((x) => x && x.blob)) {
+            let px;
+            try { px = await imageSizePx(it.blob); } catch (e) { px = { w: 4, h: 3 }; }
+            list.push(Object.assign({}, it, { px, hoch: px.h > px.w }));
+          }
+          for (let i = 0; i < list.length; i++) {
+            const a = list[i], b = list[i + 1];
+            if (a.hoch && b && b.hoch) {
+              rows += tr(await fotoZelle(a, g1, 1, FOTO_HOCH) + await fotoZelle(b, g2 + g3, 2, FOTO_HOCH));
+              hoehe += Math.max(bildCm(a, FOTO_HOCH), bildCm(b, FOTO_HOCH)) + capCm(a, b) + 0.2;
+              i++;
+            } else {
+              const opts = a.hoch ? FOTO_HOCH : FOTO_QUER;
+              rows += tr(await fotoZelle(a, g1 + g2 + g3, 3, opts));
+              hoehe += bildCm(a, opts) + capCm(a) + 0.2;
+            }
+          }
+        }
+        textZeile();
+
+        const rand = ['top', 'left', 'bottom', 'right'].map((s) => `<w:${s} ${linie}/>`).join('') +
+          '<w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>';
+        const tbl = '<w:tbl><w:tblPr>' +
+          `<w:tblW w:w="${TBL_W}" w:type="dxa"/><w:tblLayout w:type="fixed"/>` +
+          `<w:tblBorders>${rand}</w:tblBorders>` +
+          '<w:tblCellMar><w:left w:w="140" w:type="dxa"/><w:right w:w="140" w:type="dxa"/></w:tblCellMar>' +
+          '</w:tblPr>' +
+          `<w:tblGrid>${KARTE_G.map((w) => `<w:gridCol w:w="${w}"/>`).join('')}</w:tblGrid>` +
+          rows + '</w:tbl>';
+        // Kleiner Abstand zur nächsten Karte (ohne Absatz dazwischen verschmilzt Word die Tabellen).
+        const abstand = '<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>' +
+          '<w:rPr><w:sz w:val="16"/></w:rPr></w:pPr></w:p>';
+        return { xml: [tbl, abstand], hoeheCm: hoehe + 0.4 };
+      },
+
+      // Kopf-/Fußzeile ab Seite 2: kopf = Text der Kopfzeile, Fußzeile „Seite x von y".
+      kopfFuss(o) { kopfText = (o && o.kopf) || ''; return api; },
+
+      async logo(opts) {
+        try {
+          const xml = await api.logoXml(opts);
+          if (xml) body.push(xml);
+        } catch (e) {
+          console.warn('Logo konnte nicht eingebettet werden:', e);
+        }
+        return api;
+      },
+
+      async toBlob() {
+        const zip = new JSZip();
+
+        const hf = kopfText != null;
+        zip.file('[Content_Types].xml', contentTypes(hf));
+        zip.file('_rels/.rels', ROOT_RELS);
+        zip.file('word/styles.xml', STYLES_XML);
+        if (hf) {
+          zip.file('word/header1.xml', headerXml(kopfText));
+          zip.file('word/footer1.xml', FOOTER_XML);
+        }
+
+        zip.file('word/document.xml',
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' +
+          ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' +
+          ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"' +
+          ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"' +
+          ' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+          '<w:body>' + body.join('') + sectPr(hf) + '</w:body></w:document>');
+
+        zip.file('word/_rels/document.xml.rels',
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+          (hf ? '<Relationship Id="rIdKopf" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>' +
+            '<Relationship Id="rIdFuss" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>' : '') +
+          media.map((m) =>
+            `<Relationship Id="${m.rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${escapeAttr('media/' + m.file)}"/>`
+          ).join('') +
+          '</Relationships>');
+
+        for (const m of media) zip.file('word/media/' + m.file, m.blob);
+
+        return zip.generateAsync({ type: 'blob', mimeType: MIME, compression: 'DEFLATE' });
+      },
+    };
+    return api;
+  }
+
+  // ---- gemeinsame Formatierer ----
+  // 'YYYY-MM-DD' -> 'TT.MM.JJJJ' (unveränderte Rückgabe, wenn kein ISO-Datum).
+  function fmtDate(datum) {
+    if (!datum) return '';
+    const m = String(datum).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? `${m[3]}.${m[2]}.${m[1]}` : String(datum);
+  }
+
+  // Einheitliches Dateinamensmuster der App:
+  //   <Prefix>_LI<Filialnummer>_<Ort>_<YYYY_MM_DD>.<ext>
+  // Aus der Filiale wird die führende Nummer extrahiert, damit der Ort – der in der
+  // Filialangabe „7265 Memmingen" oft schon steckt – nicht doppelt erscheint.
+  function buildFileName(prefix, model, ext) {
+    const clean = (s) => String(s || '').replace(/[\\/:*?"<>|]/g, '').trim();
+    const filRaw = clean(model.filiale);
+    const nr = App.filialNr(filRaw) || (filRaw.match(/\d+/) || [])[0];
+    const fil = (nr || filRaw || 'Projekt').replace(/\s+/g, '_');
+    const ort = clean(model.ort).replace(/\s+/g, '_');
+    const d = Datum.fuerDatei(model.datum);
+    const parts = [prefix, 'LI' + fil];
+    if (ort) parts.push(ort);
+    parts.push(d);
+    return parts.join('_').replace(/_+/g, '_') + '.' + (ext || 'docx');
+  }
+
+  return {
+    MIME, EMU_PER_CM, MAX_W_EMU,
+    create, escapeXml, escapeAttr, xmlSauber, fmtDate, buildFileName,
+    pText, pBold, pEmpty, pHead, pTitle, pRight, pSmall, pTight, pPageBreak,
+    pStyled, pBar, table, TBL_W,
+  };
+})();
