@@ -100,17 +100,20 @@ const App = (() => {
   // Lange Inhalte (Ordner mit vielen Bildern) werden nur über den sichtbaren Teil animiert:
   // Was unterhalb des Bildschirmrands liegt, sieht ohnehin niemand – so bleibt die
   // Animation auch auf alten Handys kurz und ruckelfrei, egal wie lang der Ordner ist.
-  function sichtbareHoehe(el, h) {
-    const rest = window.innerHeight - el.getBoundingClientRect().top + 40;
+  // obenBei: Bildschirmhöhe, an der der Inhalt nach einem gleichzeitigen Scrollen beginnt
+  // (sonst die aktuelle Lage) – dann wird über den am Ende sichtbaren Teil animiert.
+  function sichtbareHoehe(el, h, obenBei) {
+    const top = obenBei != null ? obenBei : el.getBoundingClientRect().top;
+    const rest = window.innerHeight - top + 40;
     return Math.min(h, Math.max(120, rest));
   }
 
   // Aufklappen: Höhe 0 → natürliche Höhe. Das Element steht bereits fertig im DOM.
-  function animOpen(el) {
+  function animOpen(el, obenBei) {
     if (ohneAnimation(el)) return;
     const h = el.offsetHeight;
     if (!h) return;
-    const ziel = sichtbareHoehe(el, h);
+    const ziel = sichtbareHoehe(el, h, obenBei);
     const cs = getComputedStyle(el);
     el.style.overflow = 'hidden';
     const a = el.animate([
@@ -256,11 +259,20 @@ const App = (() => {
     openOverlay(overlay);
     $('#modalCancel').onclick = () => { closeOverlay(overlay); };
     $('#modalClose').onclick = () => { closeOverlay(overlay); }; // ✕ = Abbrechen
-    $('#modalOk').onclick = () => {
-      const data = {};
-      $$('#modalBody [name]').forEach((el) => { data[el.name] = el.value.trim(); });
-      const ok = onSubmit(data);
-      if (ok !== false) closeOverlay(overlay);
+    // onSubmit ist meist async: erst das Ergebnis abwarten. Vorher war es ein Promise und nie
+    // `false` – der Dialog schloss auch bei fehlender Pflichtangabe, die Eingaben waren weg.
+    let laeuft = false;
+    $('#modalOk').onclick = async () => {
+      if (laeuft) return;                  // Doppel-Tippen legt nichts doppelt an
+      laeuft = true;
+      try {
+        const data = {};
+        $$('#modalBody [name]').forEach((el) => { data[el.name] = el.value.trim(); });
+        const ok = await onSubmit(data);
+        if (ok !== false) closeOverlay(overlay);
+      } finally {
+        laeuft = false;
+      }
     };
   }
 
@@ -636,6 +648,42 @@ const App = (() => {
     renderSperre();
     renderVpStatus();
     await renderBackupReminder('#backupReminderStart');
+    await renderSpeicher();
+  }
+
+  // ------------------------------------------------- Speicherplatz (ab v83)
+  // navigator.storage.estimate(): belegt = Daten dieser App, frei = was der Browser ihr noch
+  // zugesteht (auf dem Handy grob der freie Gerätespeicher). null, wenn nicht abfragbar.
+  async function speicherStand() {
+    try {
+      if (!navigator.storage || !navigator.storage.estimate) return null;
+      const e = await navigator.storage.estimate();
+      if (!e || !e.quota) return null;
+      const belegt = e.usage || 0;
+      return { belegt, frei: Math.max(0, e.quota - belegt), quota: e.quota };
+    } catch (e) {
+      return null;
+    }
+  }
+  const speicherZeile = (sp) => `${groesse(sp.belegt)} belegt · ca. ${groesse(sp.frei)} frei`;
+  // Knapp: unter 1 GB frei oder über 80 % des zugestandenen Platzes belegt.
+  const speicherKnapp = (sp) => sp.frei < 1e9 || sp.belegt > 0.8 * sp.quota;
+
+  async function renderSpeicher() {
+    const info = $('#speicherInfo'), warn = $('#speicherWarnung');
+    const sp = await speicherStand();
+    if (info) {
+      info.hidden = !sp;
+      if (sp) info.textContent = 'Speicher: ' + speicherZeile(sp);
+    }
+    if (warn) {
+      const knapp = !!sp && speicherKnapp(sp);
+      warn.hidden = !knapp;
+      if (knapp) {
+        warn.innerHTML = `<span class="bk-msg">⚠ Speicher wird knapp (noch ca. ${escHtml(groesse(sp.frei))} frei). `
+          + 'Abgeschlossene Aufträge sichern (ZIP) und danach löschen – sonst können bald keine Bilder mehr gespeichert werden.</span>';
+      }
+    }
   }
 
   // Funktionsknöpfe dimmen und Hinweis zeigen, solange die Stammdaten nicht gespeichert sind.
@@ -736,6 +784,7 @@ const App = (() => {
     }
     await renderBackupReminder('#backupReminder');
     await renderBackupReminder('#backupReminderStart');
+    await renderSpeicher();
   }
 
   async function saveProjectForm(e) {
@@ -1092,13 +1141,58 @@ const App = (() => {
       const body = kopf && kopf.nextElementSibling;
       if (body && body.classList.contains('tree-body')) {
         kopf.classList.add('zu');            // Pfeil dreht schon mit zurück
-        await animClose(body);
+        // Klappt ein langer Ordner OBERHALB des angetippten zu, würde die Seite unter dem
+        // Finger wegrutschen und der angetippte Ordner nach oben aus dem Bild laufen.
+        // Deshalb hält die Ansicht ihn während der Animation Bild für Bild an seiner Stelle.
+        const halt = halteKopf(treeKopf(anker));
+        // Die Animation startet mit der sichtbaren Höhe statt der vollen – der Rest eines langen
+        // Ordners fällt sofort weg. Diese Starthöhe schon vorher setzen und den Sprung im selben
+        // Moment ausgleichen (der Ordner wird danach ohnehin neu gezeichnet).
+        if (!ohneAnimation(body)) {
+          body.style.height = sichtbareHoehe(body, body.offsetHeight) + 'px';
+          body.style.overflow = 'hidden';
+          halt.jetzt();
+        }
+        const zu = animClose(body);
+        await zu;
+        halt.jetzt();
+        halt.stop();
       }
       if (umschalten()) treeAufgeklappt = anker;
       await renderTree(anker);
     } finally {
       treeKlappt = false;
     }
+  }
+
+  // Hält eine Kopfzeile während einer Animation auf derselben Bildschirmhöhe (scrollt Bild
+  // für Bild mit). jetzt() gleicht sofort aus, stop() beendet das Mitscrollen.
+  function halteKopf(el) {
+    if (!el) return { jetzt() {}, stop() {} };
+    const soll = el.getBoundingClientRect().top;
+    let laeuft = true;
+    const jetzt = () => {
+      if (!el.isConnected) return;
+      const diff = el.getBoundingClientRect().top - soll;
+      if (Math.abs(diff) >= 1) window.scrollBy(0, diff);
+    };
+    const schritt = () => {
+      if (!laeuft) return;
+      jetzt();
+      requestAnimationFrame(schritt);
+    };
+    requestAnimationFrame(schritt);
+    return { jetzt, stop() { laeuft = false; } };
+  }
+
+  // Frisch aufgeklappter Ordner: Kopfzeile weich an den oberen Rand (unter die Kopfleiste)
+  // schieben, damit sein Inhalt darunter vollständig im Blick ist. Liefert die Zielhöhe.
+  function kopfNachOben(kopf) {
+    const leiste = $('.topbar');
+    const oben = (leiste ? leiste.getBoundingClientRect().bottom : 0) + 8;
+    const ziel = Math.max(0, window.scrollY + kopf.getBoundingClientRect().top - oben);
+    window.scrollTo({ top: ziel, behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+    return oben + kopf.offsetHeight;
   }
 
   async function renderTree(anker) {
@@ -1262,7 +1356,7 @@ const App = (() => {
       const kopf = treeKopf(treeAufgeklappt);
       treeAufgeklappt = null;
       const body = kopf && kopf.nextElementSibling;
-      if (body && body.classList.contains('tree-body')) animOpen(body);
+      if (body && body.classList.contains('tree-body')) animOpen(body, kopfNachOben(kopf));
       dreheChev(kopf);
     }
   }
@@ -1279,6 +1373,7 @@ const App = (() => {
     const row = document.createElement('div');
     row.className = 'name-row' + (n.done ? ' done' : '') + (n.skipped ? ' skipped' : '')
       + (origin ? ' origin-' + origin.cls : '');
+    row.dataset.key = n.key;
     const nodeSkip = (skipSet('nodes')).includes(n.key);
     let statusLine;
     if (n.skipped) {
@@ -1447,7 +1542,14 @@ const App = (() => {
       let ober = data.oberSelect === '__new__' ? (data.oberNew || '').trim() : data.oberSelect;
       const bildname = (data.bildname || '').trim();
       if (!ober) ober = 'Allgemein';
-      if (!bildname) { toast('Bildname fehlt'); return false; }
+      if (!bildname) {
+        // Dialog bleibt offen; Feld markieren, damit man sieht, was fehlt
+        const feld = $('[name="bildname"]', $('#modalBody'));
+        feld.classList.add('invalid');
+        feld.focus();
+        toast('Bitte einen Bildnamen eintragen');
+        return false;
+      }
       const unter = data.unterSelect === '__new__' ? ((data.unterNew || '').trim() || null)
         : data.unterSelect === '__none__' ? null : data.unterSelect;
       let pflicht = parseInt(data.pflicht, 10);
@@ -1457,7 +1559,19 @@ const App = (() => {
         ober, unter, bildname, pflicht, source: 'custom',
       };
       await Structure.addCustomName(node);
+      // Den neuen Namen zeigen: Bereich (und Unterordner) aufklappen, hinscrollen, kurz
+      // hervorheben. Sonst steht er unsichtbar am Ende eines zugeklappten Ordners.
+      expandedObers.clear();
+      expandedUnters.clear();
+      expandedObers.add(ober);
+      if (unter) expandedUnters.add(ober + Structure.SEP + unter);
       await renderTree();
+      const zeile = $$('#structureTree .name-row').find((r) => r.dataset.key === node.key);
+      if (zeile) {
+        zeile.scrollIntoView({ block: 'center', behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+        zeile.classList.add('neu-angelegt');
+        setTimeout(() => zeile.classList.remove('neu-angelegt'), 2600);
+      }
       toast('Name angelegt');
     });
 
@@ -1480,6 +1594,7 @@ const App = (() => {
       aktualisieren();
       if (unterSel.value === '__new__') $('[name="unterNew"]', body).focus();
     });
+    $('[name="bildname"]', body).addEventListener('input', (e) => e.target.classList.remove('invalid'));
     aktualisieren();
   }
 
@@ -1506,6 +1621,10 @@ const App = (() => {
   // Archiv oder im Datumsfeld einen anderen Tag, steht es auf false – dann darf ihm die
   // App den Tag nicht unter den Händen wegschieben (siehe Mitternachtswechsel unten).
   let diaryDatumAutomatisch = true;
+  // Einsatz des Tages (1|2, ab v83.13): Ein Team unterbricht die Arbeit und kommt abends
+  // wieder – dafür gibt es ein zweites, getrenntes Bautagebuch für denselben Tag
+  // (Excel-Dateiname „_Einsatz2", erste Tätigkeitszeile „2. Einsatz am …", siehe bautagebuch.js).
+  let diaryEinsatz = 1;
 
   // Beim Öffnen der Ansicht immer auf den heutigen Tag stellen.
   // Bis v39 stand hier das Auftragsdatum (`h.datum`), also der Tag, an dem der Auftrag
@@ -1515,19 +1634,92 @@ const App = (() => {
   function diaryAufHeute() {
     diaryDate = Datum.heute();
     diaryDatumAutomatisch = true;
+    diaryNachtschicht = false;
+    diaryEinsatz = 1;
+  }
+
+  // ---- Nachtschicht (v83.12) ----
+  // Eine Schicht über Mitternacht (z. B. 20:00–04:00) steht in EINEM Bautagebuch mit dem
+  // Datum des Schichtbeginns; „Ende kleiner als Start" heißt „Ende am Folgetag". Die Vorlage
+  // des Auftraggebers darf nicht geändert werden, deshalb vermerkt der Export das Enddatum in
+  // der Bemerkung (bautagebuch.js). Das AVL-Tool rechnet Ende < Start schon mit +24 h.
+  // Problem ohne diese Logik: Die Techniker tragen meist NACH der Schicht ein. Um 04:00 öffnete
+  // die App aber den neuen Tag – der Eintrag landete unter dem falschen Datum.
+  const NACHT_BIS_STUNDE = 8;   // bis 08:00 gilt ein Öffnen als „nach der Nachtschicht"
+  let diaryNachtschicht = false; // true: Vortag wurde als Nachtschicht geöffnet
+  let nachtAntwort = null;       // { tag, datum, einsatz }: Antwort auf die Frage, gilt für diesen Tag
+
+  const endetAmFolgetag = (r) => !!(r.start && r.ende && r.ende < r.start);
+  // Vor Mitternacht begonnen und noch offen (oder schon mit Ende nach Mitternacht).
+  // Start ab 12:00, damit eine nicht abgeschlossene Tagschicht nicht als Nachtschicht gilt.
+  const offeneNachtschicht = (tag) => ((tag && tag.rows) || [])
+    .some((r) => r.start && r.start >= '12:00' && (!r.ende || r.ende < r.start));
+
+  // Welcher Tag (und Einsatz) soll beim Öffnen gelten? Liefert { datum, einsatz }.
+  async function diaryStarttag() {
+    const jetzt = new Date();
+    const heute = Datum.heute(jetzt);
+    const nurHeute = { datum: heute, einsatz: 1 };
+    if (!currentJob || jetzt.getHours() >= NACHT_BIS_STUNDE) return nurHeute;
+    if (await DB.getDiary(currentJob.id, heute, 1) || await DB.getDiary(currentJob.id, heute, 2)) {
+      return nurHeute;                                              // heute schon begonnen
+    }
+    const gestern = Datum.plusTage(heute, -1);
+    if (nachtAntwort && nachtAntwort.tag === heute) return nachtAntwort;
+    // Offene Nachtschicht von gestern – zuerst im Abendeinsatz (2) suchen.
+    const g2 = await DB.getDiary(currentJob.id, gestern, 2);
+    const g1 = await DB.getDiary(currentJob.id, gestern, 1);
+    const offen = offeneNachtschicht(g2) ? 2 : offeneNachtschicht(g1) ? 1 : 0;
+    if (offen) {
+      toast('Nachtschicht: Bautagebuch vom ' + fmtDate(gestern)
+        + (g2 ? ` (${offen}. Einsatz)` : '') + ' geöffnet', 3500);
+      return { datum: gestern, einsatz: offen };
+    }
+    const ja = await openConfirm('Nachtschicht?',
+      `<p>Es ist nach Mitternacht. Gehört dein Eintrag zur Schicht von gestern
+       (<b>${fmtDate(gestern)}</b>)?</p>
+       <p class="hint">Eine Nachtschicht wird mit dem Datum des Schichtbeginns eingetragen.
+       Liegt das Ende nach Mitternacht, vermerkt die App das Enddatum in der Bemerkung.</p>`,
+      'Ja, Schicht vom ' + fmtDate(gestern).slice(0, 6), false,
+      'Nein, heute (' + fmtDate(heute).slice(0, 6) + ')');
+    // Ja: den letzten vorhandenen Einsatz von gestern öffnen. War gestern tagsüber schon ein
+    // Einsatz, kann der Techniker oben „+ 2. Einsatz an diesem Tag" wählen.
+    nachtAntwort = ja ? { tag: heute, datum: gestern, einsatz: g2 ? 2 : 1 }
+      : { tag: heute, datum: heute, einsatz: 1 };
+    return nachtAntwort;
+  }
+
+  // Hinweis unter den Zeiten: „Ende am Folgetag (12.11.2026) – Arbeitszeit 7:30 h".
+  function updateFolgetag() {
+    for (const d of $$('#diaryRows .diary-row')) {
+      const r = { start: timeVal(d.querySelector('.dr-start')), ende: timeVal(d.querySelector('.dr-ende')) };
+      const el = d.querySelector('.dr-folgetag');
+      if (!el) continue;
+      el.hidden = !(endetAmFolgetag(r) && diaryDate);
+      if (el.hidden) continue;
+      const min = (t) => { const [h, m] = (t || '0:0').split(':').map(Number); return h * 60 + m; };
+      const netto = min(r.ende) + 1440 - min(r.start) - min(timeVal(d.querySelector('.dr-pause')));
+      el.textContent = `Ende am Folgetag (${fmtDate(Datum.plusTage(diaryDate, 1))}) – Arbeitszeit `
+        + `${Math.floor(netto / 60)}:${String(netto % 60).padStart(2, '0')} h. `
+        + 'Das Enddatum kommt automatisch in die Bemerkung.';
+    }
   }
 
   async function initDiaryView() {
     const f = $('#diaryForm');
     diaryAufHeute();
+    const start = await diaryStarttag();
+    if (start.datum !== diaryDate) { diaryDate = start.datum; diaryNachtschicht = true; }
+    diaryEinsatz = start.einsatz;
     f.datum.value = diaryDate;
-    await loadDiaryForDate(diaryDate);
+    await loadDiaryForDate(diaryDate, diaryEinsatz);
     await renderDiaryArchive();
     f.datum.onchange = async () => {
       await flushDiary();                 // alten Tag sichern, bevor das Formular umschaltet
       diaryDate = f.datum.value;
+      diaryEinsatz = 1;
       diaryDatumAutomatisch = (diaryDate === Datum.heute());
-      await loadDiaryForDate(diaryDate);
+      await loadDiaryForDate(diaryDate, 1);
       await renderDiaryArchive();
     };
     if (!diaryAutoSaveAktiv) {            // Listener nur einmal registrieren
@@ -1543,7 +1735,8 @@ const App = (() => {
     return `${d}.${m}.${y}`;
   }
 
-  // Liste der gespeicherten Bautagebuch-Tage des aktuellen Auftrags (neueste zuerst).
+  // Liste der gespeicherten Bautagebücher des aktuellen Auftrags (neueste zuerst). Hat ein
+  // Tag zwei Einsätze, steht jeder als eigene Zeile da („11.11.2026 · 2. Einsatz").
   async function renderDiaryArchive() {
     const cont = $('#diaryArchive');
     if (!cont || !currentJob) return;
@@ -1552,51 +1745,103 @@ const App = (() => {
       cont.innerHTML = '<p class="hint">Noch keine Bautagebücher gespeichert. Trage unten einen Tag ein und tippe „Tag speichern".</p>';
       return;
     }
+    const mitZwei = new Set(days.filter((d) => d.einsatz > 1).map((d) => d.datum));
     cont.innerHTML = '';
     for (const day of days) {
-      const active = day.datum === diaryDate;
+      const active = day.datum === diaryDate && day.einsatz === diaryEinsatz;
+      const titel = fmtDate(day.datum) + (mitZwei.has(day.datum) ? ` · ${day.einsatz}. Einsatz` : '');
       const snippet = (day.taetigkeiten || '').replace(/\s+/g, ' ').trim().slice(0, 60);
       const div = document.createElement('div');
       div.className = 'diary-arch-item' + (active ? ' active' : '');
       div.innerHTML = `<div class="da-main">
-          <div class="da-date">${fmtDate(day.datum)}</div>
+          <div class="da-date">${titel}</div>
           <div class="da-snip">${escHtml(snippet || '—')}</div>
         </div>
         <span class="da-go">öffnen ›</span>
-        <button class="da-del" title="Tag löschen">🗑</button>`;
+        <button class="da-del" title="Löschen">🗑</button>`;
       div.querySelector('.da-main').onclick = async () => {
         await flushDiary();            // aktuellen Tag sichern, bevor ein anderer geladen wird
         diaryDate = day.datum;
+        diaryEinsatz = day.einsatz;
         diaryDatumAutomatisch = (diaryDate === Datum.heute());
         $('#diaryForm').datum.value = day.datum;
-        await loadDiaryForDate(day.datum);
+        await loadDiaryForDate(day.datum, day.einsatz);
         await renderDiaryArchive();
         window.scrollTo(0, 0);
-        toast('Tag ' + fmtDate(day.datum) + ' geladen – bearbeitbar');
+        toast(titel + ' geladen – bearbeitbar');
       };
       div.querySelector('.da-go').onclick = div.querySelector('.da-main').onclick;
-      div.querySelector('.da-del').onclick = (e) => { e.stopPropagation(); deleteDiaryFlow(day); };
+      div.querySelector('.da-del').onclick = (e) => { e.stopPropagation(); deleteDiaryFlow(day, mitZwei.has(day.datum)); };
       cont.appendChild(div);
     }
   }
 
-  async function deleteDiaryFlow(day) {
+  // Löschen eines Einsatzes. Wird der 1. gelöscht, während ein 2. existiert, rückt der 2.
+  // nach (wird zum 1.) – sonst stünde ein „2. Einsatz" ohne ersten da.
+  async function deleteDiaryFlow(day, zweiEinsaetze) {
+    const titel = fmtDate(day.datum) + (zweiEinsaetze ? ` (${day.einsatz}. Einsatz)` : '');
+    const nachruecken = zweiEinsaetze && day.einsatz === 1;
     const ok = await openConfirm(
-      'Bautagebuch-Tag löschen?',
-      `<p>Den Tag <b>${fmtDate(day.datum)}</b> wirklich löschen?</p>
-       <p class="hint">Die Eingaben dieses Tages werden entfernt. Das kann nicht rückgängig
-       gemacht werden.</p>`,
+      zweiEinsaetze ? 'Einsatz löschen?' : 'Bautagebuch-Tag löschen?',
+      `<p><b>${titel}</b> wirklich löschen?</p>
+       ${nachruecken ? '<p>Der 2. Einsatz dieses Tages wird danach zum 1. Einsatz.</p>' : ''}
+       <p class="hint">Die Eingaben werden entfernt. Das kann nicht rückgängig gemacht werden.</p>`,
       'Löschen', true);
     if (!ok) return;
-    await DB.deleteDiary(currentJob.id, day.datum);
-    if (day.datum === diaryDate) await loadDiaryForDate(diaryDate); // Formular leeren/auffrischen
+    clearTimeout(diarySaveTimer);      // kein verspätetes Auto-Speichern des gelöschten Einsatzes
+    await DB.deleteDiary(currentJob.id, day.datum, day.einsatz);
+    if (nachruecken) {
+      const zwei = await DB.getDiary(currentJob.id, day.datum, 2);
+      if (zwei) {
+        await DB.saveDiary(currentJob.id, Object.assign({}, zwei, { einsatz: 1 }));
+        await DB.deleteDiary(currentJob.id, day.datum, 2);
+      }
+    }
+    if (day.datum === diaryDate) {
+      if (diaryEinsatz === 2 && (nachruecken || day.einsatz === 2)) diaryEinsatz = 1;
+      await loadDiaryForDate(diaryDate, diaryEinsatz); // Formular leeren/auffrischen
+    }
     await renderDiaryArchive();
-    toast('Tag ' + fmtDate(day.datum) + ' gelöscht');
+    toast(titel + ' gelöscht');
   }
 
-  async function loadDiaryForDate(datum) {
+  // Umschalter unter dem Datum: „+ 2. Einsatz an diesem Tag" (sobald der 1. gespeichert ist)
+  // bzw. „1. Einsatz | 2. Einsatz", wenn es einen zweiten gibt oder er gerade offen ist.
+  async function renderEinsatzLeiste() {
+    const box = $('#diaryEinsatz');
+    if (!box || !currentJob || !diaryDate) return;
+    const e1 = await DB.getDiary(currentJob.id, diaryDate, 1);
+    const e2 = await DB.getDiary(currentJob.id, diaryDate, 2);
+    if (e2 || diaryEinsatz === 2) {
+      box.innerHTML = [1, 2].map((n) => `<button type="button" class="de-tab${n === diaryEinsatz ? ' active' : ''}"
+        data-einsatz="${n}" aria-pressed="${n === diaryEinsatz}">${n}. Einsatz</button>`).join('');
+      box.hidden = false;
+    } else if (e1) {
+      box.innerHTML = '<button type="button" class="btn ghost wide de-neu" data-einsatz="2">+ 2. Einsatz an diesem Tag</button>';
+      box.hidden = false;
+    } else {
+      box.innerHTML = '';
+      box.hidden = true;
+    }
+    box.onclick = (e) => {
+      const b = e.target.closest('[data-einsatz]');
+      if (b) wechsleEinsatz(+b.dataset.einsatz);
+    };
+  }
+
+  async function wechsleEinsatz(n) {
+    if (n === diaryEinsatz) return;
+    await flushDiary();                 // offenen Einsatz sichern, bevor umgeschaltet wird
+    diaryEinsatz = n;
+    await loadDiaryForDate(diaryDate, n);
+    await renderDiaryArchive();
+    if (n === 2) toast('2. Einsatz: eigenes Bautagebuch für denselben Tag');
+  }
+
+  async function loadDiaryForDate(datum, einsatz) {
     const f = $('#diaryForm');
-    const saved = await DB.getDiary(currentJob.id, datum);
+    const nr = einsatz || 1;
+    const saved = await DB.getDiary(currentJob.id, datum, nr);
     const techs = (currentJob && currentJob.header && currentJob.header.techniker) || [];
 
     if (saved) {
@@ -1607,13 +1852,106 @@ const App = (() => {
       f.ortDatum.value = saved.ortDatum || defaultOrtDatum(datum);
       renderDiaryRows(saved.rows || techs.map((t) => ({ name: t })));
     } else {
-      f.anzTechniker.value = techs.length || '';
+      // Neuer 2. Einsatz: meist dasselbe Team – Namen (und Anzahl) aus dem 1. Einsatz
+      // vorbelegen, Zeiten und Texte bleiben leer.
+      const e1 = nr > 1 ? await DB.getDiary(currentJob.id, datum, 1) : null;
+      const namen = e1 && (e1.rows || []).filter((r) => r.name || r.name2)
+        .map((r) => ({ name: r.name || '', name2: r.name2 || '' }));
+      f.anzTechniker.value = e1 && e1.anzTechniker != null ? e1.anzTechniker : (techs.length || '');
       f.taetigkeiten.value = '';
       f.behinderungen.value = '';
       f.vorkommnisse.value = '';
       f.ortDatum.value = defaultOrtDatum(datum);
-      renderDiaryRows(techs.map((t) => ({ name: t })));
+      renderDiaryRows(namen && namen.length ? namen : techs.map((t) => ({ name: t })));
     }
+    korrekturVorher = null;
+    $('#diaryKorrUndo').hidden = true;
+    await renderEinsatzLeiste();
+  }
+
+  // ---- Texte korrigieren (regelbasiert, js/textkorrektur.js) ----
+  // Zeigt je Textfeld Original und Vorschlag mit markierten Änderungen; der Techniker
+  // wählt, was übernommen wird. Die Originale bleiben bis zum Tageswechsel für
+  // „Korrektur rückgängig" erhalten.
+  const KORR_FELDER = [
+    ['taetigkeiten', 'Beschreibung der Tätigkeiten'],
+    ['behinderungen', 'Behinderungen'],
+    ['vorkommnisse', 'Besondere Vorkommnisse'],
+  ];
+  let korrekturVorher = null;
+
+  // Wort-Diff (LCS über Wörter und Leerraum): zeigt den neuen Text, geänderte/neue Wörter
+  // hervorgehoben. Gelöschte Wörter werden nicht eingeblendet – auf dem Handy wäre der
+  // Text sonst kaum lesbar; das Original ist im Dialog aufklappbar.
+  function wortDiffHtml(alt, neu) {
+    const a = alt.split(/(\s+)/).filter((t) => t !== '');
+    const b = neu.split(/(\s+)/).filter((t) => t !== '');
+    const n = a.length, m = b.length;
+    const L = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+      }
+    }
+    const out = [];
+    let i = 0, j = 0;
+    const leer = (t) => /^\s+$/.test(t);
+    while (i < n || j < m) {
+      if (i < n && j < m && a[i] === b[j]) { out.push(escHtml(b[j])); i++; j++; }
+      else if (j < m && (i >= n || L[i][j + 1] >= L[i + 1][j])) {
+        out.push(leer(b[j]) ? escHtml(b[j]) : `<ins>${escHtml(b[j])}</ins>`); j++;
+      } else {
+        i++;
+      }
+    }
+    return out.join('');
+  }
+
+  function openTextkorrektur() {
+    const f = $('#diaryForm');
+    const vorschlaege = KORR_FELDER.map(([name, titel]) => {
+      const alt = f[name].value;
+      const erg = Textkorrektur.korrigiere(alt, name);
+      return { name, titel, alt, neu: erg.text, hinweise: erg.hinweise, geaendert: alt.trim() !== '' && erg.text !== alt };
+    });
+    if (vorschlaege.every((v) => !v.alt.trim())) {
+      toast('Noch kein Text eingetragen.');
+      return;
+    }
+    if (!vorschlaege.some((v) => v.geaendert)) {
+      toast('Keine Korrektur nötig – die Texte entsprechen bereits den Regeln.');
+      return;
+    }
+    const html = '<p class="tk-info">Vorschlag nach den hinterlegten Schreibregeln (ohne KI). '
+      + '<ins>Markiert</ins> = geändert. Bitte inhaltlich gegenlesen – '
+      + 'nach dem Übernehmen kann im Feld weiter geändert werden.</p>'
+      + vorschlaege.filter((v) => v.alt.trim()).map((v) => `
+        <div class="tk-feld">
+          <label class="tk-wahl"><input type="checkbox" name="${v.name}" ${v.geaendert ? 'checked' : 'disabled'} />
+            ${escHtml(v.titel)}${v.geaendert ? '' : ' – keine Änderung'}</label>
+          ${v.geaendert ? `<div class="tk-diff">${wortDiffHtml(v.alt, v.neu)}</div>
+            <details class="tk-orig"><summary>Original anzeigen</summary><div>${escHtml(v.alt)}</div></details>` : ''}
+          ${v.hinweise.length ? `<ul class="tk-hinweise">${v.hinweise.map((h) => `<li>${escHtml(h)}</li>`).join('')}</ul>` : ''}
+        </div>`).join('');
+    openConfirm('Texte korrigieren', html, 'Auswahl übernehmen', false, 'Verwerfen').then((ok) => {
+      if (!ok) return;
+      // Häkchen wurden vor dem Schließen gesetzt – Body ist noch im DOM
+      const gewaehlt = vorschlaege.filter((v) => v.geaendert && $(`#modalBody input[name="${v.name}"]`)?.checked);
+      if (!gewaehlt.length) return;
+      korrekturVorher = {};
+      gewaehlt.forEach((v) => { korrekturVorher[v.name] = v.alt; f[v.name].value = v.neu; });
+      $('#diaryKorrUndo').hidden = false;
+      toast('Korrektur übernommen – bitte gegenlesen und Tag speichern.');
+    });
+  }
+
+  function undoTextkorrektur() {
+    if (!korrekturVorher) return;
+    const f = $('#diaryForm');
+    Object.entries(korrekturVorher).forEach(([name, alt]) => { f[name].value = alt; });
+    korrekturVorher = null;
+    $('#diaryKorrUndo').hidden = true;
+    toast('Originaltexte wiederhergestellt.');
   }
 
   function defaultOrtDatum(datum) {
@@ -1690,6 +2028,7 @@ const App = (() => {
         ${timeFieldHtml('dr-ende', 'Ende', r.ende)}
         ${timeFieldHtml('dr-pause', 'Pause', r.pause)}
       </div>
+      <p class="dr-folgetag" hidden></p>
       <textarea class="dr-bem" rows="1" placeholder="Bemerkung">${escHtml(r.bemerkung || '')}</textarea>`;
     // Namensauswahl aus der Technikerliste; wer am selben Tag schon eingetragen ist, fehlt dort.
     for (const feld of div.querySelectorAll('.dr-name, .dr-name2')) {
@@ -1720,6 +2059,7 @@ const App = (() => {
     const add = $('#diaryAddRow');
     if (add) add.hidden = rows.length >= MAX_TECH;
     updateZweitname();
+    updateFolgetag();
   }
 
   // „+ 2. Techniker" nur, wenn alle 5 Blöcke Name + Start + Ende haben (Pause darf fehlen).
@@ -1776,6 +2116,9 @@ const App = (() => {
     });
     scheduleDiarySave();
     updateZweitname();
+    // Ohne diesen Aufruf blieb ein „Ende am Folgetag"-Hinweis aus einer vorherigen Eingabe
+    // stehen, obwohl die übernommenen Zeiten am selben Tag enden (v83.15, Fund von Michael).
+    updateFolgetag();
     toast('Zeiten von Techniker 1 übernommen');
   }
 
@@ -1828,10 +2171,12 @@ const App = (() => {
         commitTime(t);
       }
       updateZweitname();
+      updateFolgetag();
     });
     cont.addEventListener('input', (e) => {
       if (e.target.classList.contains('invalid')) e.target.classList.remove('invalid');
       updateZweitname();
+      updateFolgetag();
     });
     const add = $('#diaryAddRow');
     if (add) add.onclick = addDiaryRow;
@@ -1850,6 +2195,7 @@ const App = (() => {
 
     return {
       datum: f.datum.value,
+      einsatz: diaryEinsatz,
       anzTechniker: f.anzTechniker.value,
       rows,
       taetigkeiten: f.taetigkeiten.value,
@@ -1864,12 +2210,13 @@ const App = (() => {
   // das Datum gewechselt wurde – das Formular wurde dabei kommentarlos überschrieben.
   // datumFuer: unter welchem Tag gespeichert wird. Beim Datumswechsel steht im Feld bereits
   // das NEUE Datum, gespeichert werden muss aber der alte Tag.
-  async function autoSaveDiary(datumFuer) {
+  async function autoSaveDiary(datumFuer, einsatzFuer) {
     if (!currentJob) return false;
     const f = $('#diaryForm');
     if (!f || !f.datum) return false;
     const model = gatherDiary();
     if (datumFuer) model.datum = datumFuer;
+    if (einsatzFuer) model.einsatz = einsatzFuer;
     if (!model.datum) return false;
     // Ein unberührtes Formular soll keinen leeren Archiv-Eintrag anlegen. „ortDatum" und
     // „anzTechniker" zählen nicht als Inhalt – beide sind vorbelegt.
@@ -1884,14 +2231,17 @@ const App = (() => {
   function scheduleDiarySave() {
     clearTimeout(diarySaveTimer);
     diarySaveTimer = setTimeout(() => {
-      autoSaveDiary(diaryDate).catch((e) => console.warn('Auto-Speichern fehlgeschlagen', e));
+      autoSaveDiary(diaryDate, diaryEinsatz)
+        // Nach dem ersten Speichern des 1. Einsatzes erscheint „+ 2. Einsatz an diesem Tag".
+        .then((ok) => { if (ok && $('#diaryEinsatz').hidden) renderEinsatzLeiste(); })
+        .catch((e) => console.warn('Auto-Speichern fehlgeschlagen', e));
     }, 800);
   }
 
   // Sofort sichern (Ansicht wird verlassen, App geht in den Hintergrund).
   async function flushDiary() {
     clearTimeout(diarySaveTimer);
-    try { await autoSaveDiary(diaryDate); } catch (e) { console.warn('Auto-Speichern fehlgeschlagen', e); }
+    try { await autoSaveDiary(diaryDate, diaryEinsatz); } catch (e) { console.warn('Auto-Speichern fehlgeschlagen', e); }
   }
 
   // Zahl der eingetragenen Personen: Name und 2. Name zählen je für sich; „A + B" in einem
@@ -1927,6 +2277,7 @@ const App = (() => {
     if (!(await pruefeAnzahlTechniker(model, 'speichern'))) return;
     await DB.saveDiary(currentJob.id, model);
     await renderDiaryArchive();
+    await renderEinsatzLeiste();
     const s = $('#diarySaved');
     s.hidden = false; setTimeout(() => { s.hidden = true; }, 2000);
     toast('Tag gespeichert');
@@ -1938,6 +2289,7 @@ const App = (() => {
     if (!(await pruefeAnzahlTechniker(model, 'exportieren'))) return;
     await DB.saveDiary(currentJob.id, model); // immer mitspeichern
     await renderDiaryArchive();
+    await renderEinsatzLeiste();
     const h = (currentJob && currentJob.header) || {};
     const full = Object.assign({}, model, {
       filiale: h.filiale || '',
@@ -1974,8 +2326,11 @@ const App = (() => {
       // neuer Tag angebrochen (Handy über Nacht gesperrt), auf den heutigen Tag umstellen.
       // Nur, wenn das Datum von der App gesetzt war – einen bewusst gewählten Archivtag
       // lässt sie stehen.
+      // Eine bewusst geöffnete Nachtschicht (Vortag) bleibt am Folgetag stehen, bis die
+      // Ansicht neu geöffnet wird – sonst spränge sie beim Entsperren um 08:30 weg.
       if (aktiveView === 'view-bautagebuch' && diaryDatumAutomatisch
-          && diaryDate !== Datum.heute()) {
+          && diaryDate !== Datum.heute()
+          && !(diaryNachtschicht && Datum.plusTage(diaryDate, 1) === Datum.heute())) {
         // Erst den bisherigen Tag sichern (flushDiary arbeitet noch mit dem alten
         // diaryDate), dann umstellen – sonst ginge eine offene Eingabe verloren.
         flushDiary()
@@ -2004,6 +2359,8 @@ const App = (() => {
     // die Übergabe des Kollegen heran.
     $('#startImport').addEventListener('change', importAnyFile);
     $('#diarySaveBtn').onclick = saveDiary;
+    $('#diaryKorrBtn').onclick = openTextkorrektur;
+    $('#diaryKorrUndo').onclick = undoTextkorrektur;
     $('#diaryExportBtn').onclick = busy(exportDiary);
     // Schatten unter der Kopfleiste, sobald darunter gescrollt wird.
     const topbar = $('.topbar');
@@ -2022,7 +2379,7 @@ const App = (() => {
   // Zeigt unten auf der Startseite die installierte App-Version an. Autoritativ ist
   // die Cache-Version des laufenden Service Workers (per Nachricht abgefragt); solange
   // die noch nicht geantwortet hat, dient APP_VERSION als Sofort-Anzeige/Fallback.
-  const APP_VERSION = 'v69'; // Bei jeder App-Änderung zusammen mit CACHE in sw.js erhöhen.
+  const APP_VERSION = 'v83.15'; // Mit CACHE in sw.js ändern: v81 -> v82 nur bei neuen Funktionen (Doku), sonst v81.1, v81.2 …
   function renderAppVersion(v) {
     const el = $('#appVersion');
     if (!el) return;
@@ -2055,6 +2412,65 @@ const App = (() => {
     frage();
   }
 
+  // ---- Warnung: App läuft nicht vom Startbildschirm ----
+  // Auf dem iPhone löscht iOS die Daten einer nur in Safari geöffneten Seite nach etwa einer
+  // Woche ohne Nutzung – mit allen Fotos und Aufträgen. Für installierte Apps gilt das nicht.
+  // Außerdem hat die installierte App eigene Daten, getrennt vom Browser. Deshalb auf Handys
+  // deutlich darauf hinweisen (übernommen aus der Auftragsdoku-App, dort im Einsatz bewährt).
+  function laeuftAlsApp() {
+    // display-mode deckt Android/Chrome ab, navigator.standalone das iPhone.
+    try { if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true; } catch (e) { /* egal */ }
+    return navigator.standalone === true;
+  }
+  function istApple() {
+    // iPadOS ab 13 meldet sich als Mac – erkennbar daran, dass es Touch kann.
+    return /iP(hone|ad|od)/.test(navigator.userAgent)
+      || (/Mac/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+  }
+  const INSTALL_TEXT = {
+    ios: '<b>Die App läuft gerade als Safari-Seite.</b> Fotos und Aufträge liegen nur auf diesem '
+      + 'Gerät – iOS löscht sie nach etwa einer Woche ohne Nutzung. Jetzt eine Sicherung (ZIP) machen. '
+      + 'Danach: Teilen-Symbol antippen → „Zum Home-Bildschirm“ und die App künftig nur noch von dort '
+      + 'starten. Achtung: Die installierte App hat eigene Daten – Aufträge über „Auftrag übernehmen“ '
+      + 'aus der Sicherung einlesen.',
+    android: '<b>Die App läuft gerade als Browser-Seite.</b> Fotos und Aufträge liegen nur in diesem '
+      + 'Browser. Jetzt eine Sicherung (ZIP) machen. Danach: Browser-Menü (⋮) → „App installieren“ '
+      + 'bzw. „Zum Startbildschirm hinzufügen“ und die App künftig nur noch vom Startbildschirm starten.',
+  };
+  function pruefeInstallation() {
+    const box = $('#installHinweis');
+    if (!box) return;
+    // Nur auf Handys warnen – am PC ist das Arbeiten im Browser gewollt.
+    const mobil = istApple() || /Android/.test(navigator.userAgent);
+    // Weggeklickt gilt bis morgen, nicht für immer: Wer wochenlang im Browser arbeitet, soll
+    // regelmäßig erinnert werden.
+    let weggeklickt = false;
+    try { weggeklickt = Date.now() < +(localStorage.getItem('installHinweisZuBis') || 0); } catch (e) { /* egal */ }
+    if (!mobil || laeuftAlsApp() || weggeklickt) { box.hidden = true; return; }
+    $('#installText').innerHTML = istApple() ? INSTALL_TEXT.ios : INSTALL_TEXT.android;
+    box.hidden = false;
+  }
+  function installHinweisSchliessen() {
+    try {
+      const morgen = new Date();
+      morgen.setHours(24, 0, 0, 0);
+      localStorage.setItem('installHinweisZuBis', String(morgen.getTime()));
+    } catch (e) { /* egal */ }
+    $('#installHinweis').hidden = true;
+  }
+
+  // Eine App, die nur aus dem Hintergrund geholt wird, fragt nie nach einer neuen sw.js –
+  // auf dem iPhone oft tagelang, weil iOS die App nur einfriert. Deshalb beim Zurückholen
+  // selbst nachsehen, höchstens alle 10 Minuten.
+  function pruefeUpdatesBeimZurueckholen(reg) {
+    let zuletzt = Date.now();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible' || Date.now() - zuletzt < 10 * 60 * 1000) return;
+      zuletzt = Date.now();
+      reg.update().catch(() => {});
+    });
+  }
+
   async function init() {
     // Robust starten: UI bindet sich auch dann, wenn die Daten-Initialisierung
     // (z. B. IndexedDB) auf einem Gerät klemmt – die App darf nie hängenbleiben.
@@ -2066,6 +2482,9 @@ const App = (() => {
       Wochenbericht.init();
       updateNetDot();
       initAppVersion();
+      $('#installZu').onclick = installHinweisSchliessen;
+      pruefeInstallation();
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) pruefeInstallation(); });
       window.addEventListener('online', updateNetDot);
       window.addEventListener('offline', updateNetDot);
       show('view-start');
@@ -2084,7 +2503,9 @@ const App = (() => {
       if (navigator.storage && navigator.storage.persist) await navigator.storage.persist();
     } catch (e) { /* best effort */ }
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW-Registrierung fehlgeschlagen', e));
+      navigator.serviceWorker.register('sw.js')
+        .then(pruefeUpdatesBeimZurueckholen)
+        .catch((e) => console.warn('SW-Registrierung fehlgeschlagen', e));
     }
   }
 
@@ -2114,6 +2535,9 @@ const App = (() => {
     catalogNames = null;   // Vorlagen-Dropdown für diesen Auftrag neu aufbauen
     diaryDate = null;
     diaryDatumAutomatisch = true;
+    diaryNachtschicht = false;
+    nachtAntwort = null;
+    diaryEinsatz = 1;
     currentNode = null;
     expandedObers.clear();
     expandedUnters.clear();
@@ -2129,7 +2553,7 @@ const App = (() => {
   // Dateiart am Inhalt erkennen (nicht an der Endung – Android-Picker und WhatsApp melden
   // Endung/Typ unzuverlässig). Liefert { art: 'xlsx' | 'zip' | null, zip }.
   async function dateiArt(file) {
-    let zip = null, art = null;
+    let zip = null, art = null, fehler = null;
     try {
       // Direkt aus dem File lesen: ein zusätzliches arrayBuffer() hielte die komplette
       // ZIP (auf der Baustelle schnell einige hundert MB) ein zweites Mal im Speicher.
@@ -2142,20 +2566,131 @@ const App = (() => {
         || inhalt.filter((rel, f) => !f.dir && /^[^/]+\.xlsx$/i.test(rel)).length) art = 'zip';
     } catch (err) {
       console.warn('Datei ist weder .xlsx noch .zip:', err);
+      // Beginnt die Datei gar nicht mit „PK“, ist sie keine ZIP (falsche Datei gewählt) –
+      // nur sonst ist sie beschädigt bzw. unvollständig übertragen.
+      let pk = false;
+      try { const k = new Uint8Array(await file.slice(0, 2).arrayBuffer()); pk = k[0] === 0x50 && k[1] === 0x4b; } catch (e) { /* egal */ }
+      if (pk) fehler = err;
     }
-    return { art, zip };
+    return { art, zip, fehler };
   }
-  const UNBEKANNT = 'Unbekannte Datei – erwartet wird eine Übergabe-Datei (.xlsx) oder eine Bilddoku-ZIP.';
+
+  // ---------------------------------------------------- Fehlerbericht (ab v83)
+  // Beim Import lässt sich aus der Ferne sonst nicht klären, was schiefging („die ZIP geht
+  // nicht"). Der Dialog nennt Ursache und Tipp in Klartext; der Knopf schickt einen fertigen
+  // Text (Version, Gerät, Datei, Fehler, Speicher) per Teilen-Menü – sonst in die Zwischenablage.
+  function geraetKurz() {
+    const ua = navigator.userAgent || '';
+    const os = /iPhone|iPad|iPod/.test(ua) ? 'iPhone/iPad' + ((ua.match(/OS (\d+)_/) || [])[1] ? ' iOS ' + ua.match(/OS (\d+)_/)[1] : '')
+      : /Android/.test(ua) ? 'Android' + ((ua.match(/Android ([\d.]+)/) || [])[1] ? ' ' + ua.match(/Android ([\d.]+)/)[1] : '')
+        : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'Mac' : 'unbekannt';
+    const br = /SamsungBrowser/.test(ua) ? 'Samsung Internet' : /Edg\//.test(ua) ? 'Edge'
+      : /CriOS|Chrome\//.test(ua) ? 'Chrome' : /FxiOS|Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'Browser?';
+    const app = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ? 'als App' : 'im Browser';
+    return `${os} · ${br} · ${app}`;
+  }
+  const groesse = (b) => (b == null ? '?' : b >= 1e9 ? (b / 1e9).toFixed(1).replace('.', ',') + ' GB'
+    : b >= 1e8 ? Math.round(b / 1e6) + ' MB' : b >= 1e6 ? (b / 1e6).toFixed(1).replace('.', ',') + ' MB'
+      : b >= 1e3 ? Math.round(b / 1e3) + ' kB' : b + ' Byte');
+
+  // Ursache in Klartext. schritt: 'lesen' | 'zip' | 'xlsx'
+  function fehlerUrsache(schritt, err, file) {
+    const name = err && err.name;
+    if (name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED') return fehlerText(err);
+    if (file && file.size === 0) return 'Die Datei ist leer (0 Byte). Bitte erneut herunterladen oder neu schicken lassen.';
+    if (schritt === 'lesen' && err) {
+      return 'Die Datei ist beschädigt oder nicht vollständig heruntergeladen. Bitte in WhatsApp bzw. '
+        + 'der Mail erneut herunterladen (warten, bis der Download fertig ist) und nochmals wählen.';
+    }
+    if (schritt === 'lesen') {
+      return 'Das ist keine Bilddoku-ZIP und keine Übergabe-Datei (.xlsx). Tipp iPhone: Die Dateien-App '
+        + 'entpackt eine ZIP beim Antippen – dann bitte die ZIP-Datei selbst wählen, nicht den Ordner.';
+    }
+    return (schritt === 'xlsx' ? 'Die Übergabe-Datei' : 'Die ZIP') + ' konnte nicht eingelesen werden: '
+      + ((err && err.message) || String(err || 'unbekannter Fehler'));
+  }
+
+  async function importFehler(schritt, err, file) {
+    if (err) console.error(err);
+    toastWeg();   // „Lese Datei…“ läge sonst über dem Dialog
+    const ursache = fehlerUrsache(schritt, err, file);
+    const sp = await speicherStand();
+    const h = (currentJob && currentJob.header) || {};
+    const bericht = [
+      'NFK Bilddoku – Fehlerbericht',
+      'App-Version: ' + APP_VERSION,
+      'Zeit: ' + new Date().toLocaleString('de-DE'),
+      'Gerät: ' + geraetKurz(),
+      'Datei: ' + (file ? `${file.name || '?'} (${groesse(file.size)}, Typ: ${file.type || 'unbekannt'})` : '–'),
+      'Schritt: ' + ({ lesen: 'Datei lesen', zip: 'ZIP zusammenführen', xlsx: 'Übergabe-Datei einlesen' }[schritt] || schritt),
+      'Fehler: ' + (err ? `${err.name || 'Error'}: ${err.message || err}` : 'Dateiart nicht erkannt'),
+      'Meldung: ' + ursache,
+      'Speicher: ' + (sp ? speicherZeile(sp) : 'unbekannt'),
+      'Auftrag: ' + (h.filiale || (currentJob && currentJob.name) || '–'),
+    ].join('\n');
+    openInfoModal('Import nicht möglich',
+      `<p>${escHtml(ursache)}</p>
+       <p class="hint">Hilft das nicht weiter, schick den Fehlerbericht an Michael – dann ist klar, was passiert ist.</p>
+       <button type="button" class="btn" id="fehlerSendenBtn">📤 Fehlerbericht senden</button>
+       <pre class="fehler-bericht">${escHtml(bericht)}</pre>`);
+    $('#fehlerSendenBtn').onclick = () => fehlerberichtSenden(bericht);
+  }
+
+  async function fehlerberichtSenden(text) {
+    if (navigator.share) {
+      try { await navigator.share({ title: 'NFK Bilddoku – Fehlerbericht', text }); return; } catch (e) {
+        if (e && e.name === 'AbortError') return;   // selbst abgebrochen
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('Fehlerbericht kopiert – in WhatsApp einfügen und senden.', 4200);
+    } catch (e) {
+      toast('Bitte den Text im Fenster markieren und kopieren.', 4200);
+    }
+  }
 
   async function importAnyFile(e) {
     const file = e.target.files && e.target.files[0];
     e.target.value = '';
     if (!file) return;
     toast('Lese Datei…');
-    const { art, zip } = await dateiArt(file);
+    const { art, zip, fehler } = await dateiArt(file);
     if (art === 'xlsx') return handoverImport(file);
-    if (art === 'zip') return mergeContribution(zip, file.name);
-    toast(UNBEKANNT);
+    if (art === 'zip') return mergeContribution(zip, file.name, file);
+    await importFehler('lesen', fehler, file);
+  }
+
+  // 'v82.4' -> [82, 4]; vergleicht zwei Versionen zahlenweise (<0: a älter als b).
+  function versionVergleich(a, b) {
+    const zahlen = (v) => String(v || '').replace(/^\D*/, '').split('.').map((n) => parseInt(n, 10) || 0);
+    const x = zahlen(a), y = zahlen(b);
+    for (let i = 0; i < Math.max(x.length, y.length); i++) {
+      const d = (x[i] || 0) - (y[i] || 0);
+      if (d) return d;
+    }
+    return 0;
+  }
+
+  // Warnt, wenn das Paket mit einer anderen App-Version erstellt wurde (ab v83 steht sie im
+  // Paket; fehlt sie, stammt es aus einer älteren Version). Liefert false = Import abbrechen.
+  async function versionOk(paketVersion) {
+    if (paketVersion && versionVergleich(paketVersion, APP_VERSION) === 0) return true;
+    let zeile, rat;
+    if (!paketVersion) {
+      zeile = `Paket: ältere Version (vor v83) · Deine App: <b>${escHtml(APP_VERSION)}</b>`;
+      rat = 'Der Kollege, von dem das Paket stammt, sollte seine App aktualisieren.';
+    } else if (versionVergleich(paketVersion, APP_VERSION) < 0) {
+      zeile = `Paket: <b>${escHtml(paketVersion)}</b> · Deine App: <b>${escHtml(APP_VERSION)}</b>`;
+      rat = 'Der Kollege, von dem das Paket stammt, sollte seine App aktualisieren.';
+    } else {
+      zeile = `Paket: <b>${escHtml(paketVersion)}</b> · Deine App: <b>${escHtml(APP_VERSION)}</b>`;
+      rat = 'Bitte aktualisiere deine App: kurz online gehen, App schließen und neu öffnen.';
+    }
+    return openConfirm('Andere App-Version',
+      `<p>Dieses Paket wurde mit einer anderen App-Version erstellt.</p><p>${zeile}</p>`
+      + `<p>${rat} Alle im Team – auch die Helfer – sollten mit demselben Stand arbeiten.</p>`,
+      'Trotzdem importieren', false, 'Abbrechen');
   }
 
   // Wird von Merge/Handover aufgerufen, sobald der Kopf des Pakets gelesen ist und bevor
@@ -2165,6 +2700,9 @@ const App = (() => {
   //   ziel 'neu'      neuen Auftrag aus dem Paket anlegen (nur ZIP; die .xlsx tut das ohnehin)
   //   ziel 'wechseln' in den vorhandenen Auftrag dieser Filiale (zielJob) wechseln
   async function pruefeHerkunft(paket, ziel, info) {
+    // 0) Gleicher Softwarestand? Michael will, dass alle (auch Helfer) mit derselben Version
+    //    arbeiten – jede Abweichung wird gemeldet, importieren bleibt aber möglich.
+    if (!await versionOk(paket.appVersion)) return null;
     const neuerAuftrag = !!(info && info.neu);
     let eigen = (ziel && ziel.header) || null;
     if (!eigen) return { kopfFelder: [] };   // nichts zu vergleichen
@@ -2255,7 +2793,7 @@ const App = (() => {
     return antwort;
   }
 
-  async function mergeContribution(zip, dateiname) {
+  async function mergeContribution(zip, dateiname, file) {
     toast('Führe Bilder zusammen…');
     try {
       // Offene Eingaben gehören noch zum bisherigen Auftrag – der Import kann gleich wechseln.
@@ -2287,8 +2825,7 @@ const App = (() => {
       await loadStartView();
       toast(teile.join(' · '), 4200);
     } catch (err) {
-      console.error(err);
-      toast('Zusammenführen fehlgeschlagen: ' + (err.message || err));
+      await importFehler('zip', err, file);
     }
   }
 
@@ -2303,6 +2840,7 @@ const App = (() => {
       const alt = await DB.getJob(vorher.id);
       if (!alt) return false;
       if ((alt.behinderungen || []).length) return false;
+      if ((alt.customNames || []).length) return false;   // eigene Namen sind Inhalt
       if ((await DB.getAllPhotos(alt.id)).length) return false;
       if ((await DB.listDiary(alt.id)).length) return false;
       const filialeAlt = String((alt.header || {}).filiale || '').trim();
@@ -2338,13 +2876,12 @@ const App = (() => {
       toast((r.gewechselt ? 'Stand übernommen in: ' : 'Auftrag übernommen: ') + (job.name || '')
         + (entfernt ? ' · leerer Auftrag entfernt' : ''), 4200);
     } catch (err) {
-      console.error(err);
-      toast('Import fehlgeschlagen: ' + (err.message || err));
+      await importFehler('xlsx', err, file);
     }
   }
 
   document.addEventListener('DOMContentLoaded', init);
 
   // Öffentlich für andere Module:
-  return { busy, animOpen, animClose, dreheChev, pop, toast, openInfoModal, openFormModal, openConfirm, shareFile, show, getCurrentJob, saveCurrentJob, adoptJob, filialNr, fehlerText };
+  return { APP_VERSION, busy, animOpen, animClose, dreheChev, halteKopf, kopfNachOben, pop, toast, openInfoModal, openFormModal, openConfirm, shareFile, show, getCurrentJob, saveCurrentJob, adoptJob, filialNr, fehlerText };
 })();

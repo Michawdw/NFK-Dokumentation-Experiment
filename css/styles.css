@@ -71,6 +71,11 @@ h2 { font-size: 18px; margin: 18px 0 6px; }
 h3 { font-size: 16px; margin: 16px 0 8px; }
 .hint { color: var(--muted); font-size: 14px; margin: 4px 0 12px; }
 .app-version { text-align: center; color: var(--muted); font-size: 12px; margin: 18px 0 6px; opacity: 0.8; }
+.app-version.speicher-info { margin-top: 0; }
+/* Fehlerbericht im Import-Dialog: der Text, der verschickt wird */
+.fehler-bericht { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.4;
+  background: #f3f6f9; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 12px 0 0; color: var(--muted); }
+#fehlerSendenBtn { width: 100%; margin-top: 4px; }
 
 /* ---------- Forms ---------- */
 .form label, .grid2 label { display: block; margin: 12px 0; font-weight: 600; font-size: 14px; }
@@ -371,6 +376,17 @@ fieldset.techs legend { font-weight: 700; padding: 0 6px; }
 .dr-times { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
 .dr-time { min-width: 0; }
 .dr-time-label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); }
+/* Nachtschicht: Ende < Start = Ende am Folgetag (v83.12) */
+.diary-row .dr-folgetag { margin: 6px 0 0; padding: 6px 8px; font-size: 12.5px; line-height: 1.35;
+  background: #fff6db; border-left: 3px solid #e0a100; border-radius: 4px; color: #5a4500; }
+.diary-row .dr-folgetag[hidden] { display: none; }
+/* 2. Einsatz am selben Tag (v83.13) */
+.diary-einsatz { display: flex; gap: 6px; margin: 4px 0 10px; }
+.diary-einsatz[hidden] { display: none; }
+.diary-einsatz .de-neu { margin: 0; }
+.diary-einsatz .de-tab { flex: 1; padding: 9px 6px; font: inherit; font-weight: 600; font-size: 14px;
+  border: 1.5px solid var(--brand); border-radius: 8px; background: #fff; color: var(--brand); }
+.diary-einsatz .de-tab.active { background: var(--brand); color: #fff; }
 /* Textfeld (Zahlen-Tastatur) + Uhr-Knopf rechts im Feld. Das echte Zeitfeld liegt
    unsichtbar darunter und liefert nur die Zeitauswahl (showPicker). */
 .dr-time-box { position: relative; display: block; margin-top: 6px; }
@@ -560,12 +576,13 @@ fieldset.techs legend { font-weight: 700; padding: 0 6px; }
 .wb-stand.done { color: var(--ok); background: #e7f5ec; border-color: #bfe3cd; }
 .wb-sec {
   display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-  min-height: 52px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer;
-  border: 1px solid var(--line); border-radius: 12px; background: #f3f5f8;
-  font-size: 16px; font-weight: 700; color: var(--brand); font-family: inherit;
+  min-height: 52px; padding: 14px 12px; margin-bottom: 8px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 12px; background: #fff;
+  font-size: 17px; font-weight: 800; color: var(--brand); font-family: inherit;
 }
 .wb-sec.open { border-radius: 12px 12px 0 0; margin-bottom: 0; }
-.wb-sec.done { background: #e7f5ec; border-color: #b7dfc5; color: var(--ok); }
+/* Fertig wie ein erledigter Bilddoku-Ordner: Kopf bleibt weiß, Name grün und gedämpft. */
+.wb-sec.done .wb-sec-name { color: var(--ok); opacity: .8; }
 .wb-sec.missing { border-color: var(--warn); box-shadow: 0 0 0 2px rgba(192,57,43,.18); color: var(--warn); }
 .wb-sec .chev { flex: 0 0 auto; font-size: 12px; color: var(--muted); width: 14px; }
 .wb-sec-name { flex: 1; min-width: 0; word-break: break-word; }
@@ -604,6 +621,60 @@ textarea.wb-notiztext { min-height: 66px; }
   font-weight: 700; font-size: 14px; cursor: pointer;
 }
 .wb-notiz { margin-top: 10px; }
+
+/* Baufortschritt (ab v82): Kasten oben, Gewerk-Karten mit Bereichszeilen. */
+.wb-fs { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin: 0 0 12px; }
+.wb-fs[hidden] { display: none; }
+.wb-fs-titel { font-weight: 800; color: var(--brand); margin-bottom: 6px; }
+.wb-fs-row {
+  display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; width: 100%; text-align: left;
+  background: none; border: none; border-top: 1px solid var(--line); padding: 8px 0; cursor: pointer; color: var(--text);
+  font: inherit;
+}
+.wb-fs-row:first-of-type { border-top: none; }
+.wb-fs-name { font-weight: 700; font-size: 15px; }
+.wb-fs-text { font-size: 14px; font-weight: 700; text-align: right; color: var(--muted); }
+.wb-fs-row.gruen .wb-fs-text { color: var(--ok); }
+.wb-fs-row.gelb .wb-fs-text { color: #a86c00; }
+.wb-fs-row.rot .wb-fs-text { color: var(--warn); }
+.wb-fs-row .wb-fs-bar { grid-column: 1 / -1; }
+.wb-fs-bar { display: flex; height: 10px; border-radius: 5px; background: #dde2e7; overflow: hidden; }
+.wb-fs-bar i { display: block; height: 100%; }
+.wb-fs-bar i.f { background: var(--ok); }
+.wb-fs-bar i.t { background: #e0a100; }
+/* NWS eingebracht (v83.3): drei beschriftete Stufen */
+.wb-fs-bar.stufen { height: 18px; border-radius: 6px; gap: 2px; background: none; }
+.wb-fs-bar.stufen i {
+  flex: 1; background: #dde2e7; color: var(--muted); font-style: normal; font-size: 11px; font-weight: 700;
+  line-height: 18px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wb-fs-bar.stufen i.f { background: var(--ok); color: #fff; }
+.wb-fs-bar.stufen i.t { background: #e0a100; color: #fff; }
+.wb-fs-mini { margin-top: 10px; font-size: 14px; font-weight: 700; color: var(--muted); }
+.wb-fs-mini .wb-fs-bar { margin-top: 4px; }
+.wb-bereiche { margin-top: 12px; }
+/* Gewerk als Unterordner (Kopf wie .tree-unter der Bilddoku). */
+.wb-sub {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; cursor: pointer;
+  margin: 0 0 10px 6px; width: calc(100% - 6px); padding: 10px 12px; min-height: 48px;
+  font: inherit; font-size: 15px; font-weight: 700; color: var(--brand-light);
+  background: #f7f9fb; border: 1px solid var(--line); border-radius: 10px;
+}
+.wb-sub .chev { flex: 0 0 auto; font-size: 12px; color: var(--muted); width: 14px; }
+.wb-sub-name { flex: 1; min-width: 0; word-break: break-word; }
+.wb-sub.done .wb-sub-name { color: var(--ok); opacity: .8; }
+.wb-sub.missing { border-color: var(--warn); box-shadow: 0 0 0 2px rgba(192,57,43,.18); color: var(--warn); }
+/* Im Unterordner steht der Titel schon im Kopf. */
+.wb-sub-body > .wb-item .wb-q { display: none; }
+.wb-schrank { font-weight: 800; color: var(--brand); margin: 12px 0 4px; }
+.wb-bereich { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; background: #fff; }
+.wb-bereich.pruefen { border-color: #d98c00; box-shadow: 0 0 0 2px rgba(217,140,0,.18); }
+.wb-bname { font-weight: 700; font-size: 15px; margin-bottom: 6px; }
+.wb-bereich .vp-seg { gap: 6px; }
+.wb-bereich .vp-seg .vp-opt { font-size: 13px; padding: 4px 2px; min-height: 40px; line-height: 1.15; }
+.wb-pruefen { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; font-size: 14px; color: #a86c00; font-weight: 600; }
+.wb-pruefen span { flex: 1 1 160px; }
+.wb-bereiche > .vp-seg { margin-bottom: 4px; }
 
 /* ---------- Baubehinderungsanzeige ---------- */
 /* Adressblock als abgesetzte Gruppe, damit Absender/Empfänger nicht mit den
@@ -652,12 +723,12 @@ textarea.wb-notiztext { min-height: 66px; }
 .name-row.skipped, .tree-ober.skipped, .tree-unter.skipped { box-shadow: none; }
 
 /* ---------- Tipp-Rückmeldung ---------- */
-.bigbtn, .job-item, .tree-ober, .tree-unter, .wb-sec, .vp-opt, .job-more, .diary-arch-item,
+.bigbtn, .job-item, .tree-ober, .tree-unter, .wb-sec, .wb-sub, .vp-opt, .job-more, .diary-arch-item,
 .cam-btn, .gal-btn, .skip-btn, .del-btn, .icon-btn {
   transition: transform var(--dur-fast) var(--ease), background-color var(--dur-fast),
     border-color var(--dur-fast), box-shadow var(--dur-fast);
 }
-.bigbtn:active, .job-item:active, .tree-ober:active, .tree-unter:active, .wb-sec:active,
+.bigbtn:active, .job-item:active, .tree-ober:active, .tree-unter:active, .wb-sec:active, .wb-sub:active,
 .job-more:active, .diary-arch-item:active { transform: scale(.985); }
 .vp-seg .vp-opt:active, .cam-btn:active, .gal-btn:active, .skip-btn:active,
 .del-btn:active, .icon-btn:active { transform: scale(.94); }
@@ -665,24 +736,24 @@ textarea.wb-notiztext { min-height: 66px; }
 .tree-ober:has(button:active), .tree-unter:has(button:active) { transform: none; }
 
 /* ---------- Pfeile drehen statt Zeichen tauschen ---------- */
-.tree-ober .chev, .tree-unter .chev, .wb-sec .chev, .job-more .chev {
+.tree-ober .chev, .tree-unter .chev, .wb-sec .chev, .wb-sub .chev, .job-more .chev {
   display: inline-block; text-align: center;
   transition: transform var(--dur) var(--ease);
 }
-.tree-ober.open .chev, .tree-unter.open .chev, .wb-sec.open .chev, .job-more.open .chev {
+.tree-ober.open .chev, .tree-unter.open .chev, .wb-sec.open .chev, .wb-sub.open .chev, .job-more.open .chev {
   transform: rotate(90deg);
 }
 .job-more .chev { width: 14px; font-size: 12px; margin-right: 4px; }
 
 /* ---------- Fortschrittsbalken in Ordner-Köpfen ---------- */
-.tree-ober, .tree-unter, .wb-sec { position: relative; overflow: hidden; }
-.tree-ober[style*="--p"]::after, .tree-unter[style*="--p"]::after, .wb-sec[style*="--p"]::after {
+.tree-ober, .tree-unter, .wb-sec, .wb-sub { position: relative; overflow: hidden; }
+.tree-ober[style*="--p"]::after, .tree-unter[style*="--p"]::after, .wb-sec[style*="--p"]::after, .wb-sub[style*="--p"]::after {
   content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
   background: var(--brand-light); transform-origin: left center;
   transform: scaleX(var(--p, 0));
   transition: transform 400ms var(--ease), background-color var(--dur);
 }
-.tree-ober.alldone::after, .tree-unter.alldone::after, .wb-sec.done::after { background: var(--ok); }
+.tree-ober.alldone::after, .tree-unter.alldone::after, .wb-sec.done::after, .wb-sub.fertig::after { background: var(--ok); }
 .tree-ober.skipped::after, .tree-unter.skipped::after { display: none; }
 
 /* ---------- Ansichtswechsel ---------- */
@@ -738,6 +809,13 @@ textarea.wb-notiztext { min-height: 66px; }
 .pop { animation: pop 360ms var(--ease); }
 @keyframes pop { 0% { transform: scale(.6); opacity: 0; } 60% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); } }
 .grp-check, .row-check { display: inline-block; }
+/* Eigener Name gerade angelegt: kurz hervorheben, damit man ihn in der Liste findet */
+.name-row.neu-angelegt { animation: neu-angelegt 2600ms var(--ease); }
+@keyframes neu-angelegt {
+  0%, 60% { box-shadow: 0 0 0 3px var(--brand-light); background: #eef4ff; }
+  100% { box-shadow: none; }
+}
+#modalBody input.invalid { border-color: var(--warn); background: #fdecea; }
 
 /* ---------- Namensliste ---------- */
 .namen-liste:not([hidden]) { animation: fade-in var(--dur-fast) var(--ease); }
@@ -764,4 +842,103 @@ textarea.wb-notiztext { min-height: 66px; }
   .btn.is-busy::before { animation: none; }
 }
 /* Während ein Ordner zuklappt (Klasse .zu aus app.js) dreht der Pfeil schon zurück. */
-.tree-ober.open.zu .chev, .tree-unter.open.zu .chev, .wb-sec.open.zu .chev { transform: none; }
+.tree-ober.open.zu .chev, .tree-unter.open.zu .chev, .wb-sec.open.zu .chev, .wb-sub.open.zu .chev { transform: none; }
+
+/* Kacheln nie breiter als der Bildschirm: Ohne minmax(0,1fr) wuchs die Rasterspalte auf
+   die Breite des längsten Worts („Baubehinderungsanzeige") plus Icon-Kreis – auf schmalen
+   Handys ragten die Kacheln rechts hinaus und die Seite ließ sich seitlich verschieben. */
+.bigchoice { grid-template-columns: minmax(0, 1fr); }
+.bigbtn { min-width: 0; width: 100%; }
+.bigbtn-text { flex: 1 1 auto; }
+.bigbtn-title, .bigbtn-sub { overflow-wrap: break-word; hyphens: auto; -webkit-hyphens: auto; }
+@media (min-width: 560px) {
+  .bigchoice { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 380px) {
+  .bigbtn { padding: 16px; gap: 12px; }
+  .bigbtn-emoji { width: 46px; height: 46px; font-size: 24px; }
+  .bigbtn-title { font-size: 18px; }
+}
+
+/* Zweispaltige Zeilen (Datum | seit, Gewerk | Bestellnummer, …): Bricht eine Beschriftung
+   auf zwei Zeilen um, rutschte nur ihr Feld nach unten – die beiden Felder standen versetzt.
+   Die Zellen werden jetzt unten ausgerichtet: beide Felder einer Zeile liegen immer auf
+   derselben Höhe, die kürzere Beschriftung rückt dafür etwas nach unten. */
+.grid2 { align-items: end; }
+/* Datumsfelder sind von Haus aus ein paar Pixel höher als Textfelder – gleiche
+   Mindesthöhe für alle einzeiligen Felder, damit Feldpaare auch unten bündig sind. */
+.form input:not([type="checkbox"]):not([type="radio"]), .grid2 input { min-height: 48px; }
+/* Textfelder erbten die Schrift nicht und zeigten Schreibmaschinenschrift. */
+textarea, input, select, button { font-family: inherit; }
+
+/* ---------- Geöffnete Ordner als blau getönte Einheit (Bilddoku) ----------
+   Kopf und Inhalt des offenen Ordners sind eingefärbt, damit sofort erkennbar ist, was zu
+   welchem Ordner gehört. Unterordner eine Stufe kräftiger, damit die Ebenen unterscheidbar
+   bleiben. Die Positions-Karten bleiben weiß (offen) bzw. grün (erledigt).
+   Rahmenfarbe bewusst nur oben/rechts/unten: links liegt ggf. der Herkunftsstreifen. */
+:root {
+  --open-1-head: #dbe8f5; --open-1-body: #edf3fa; --open-1-line: #bcd2e8;
+  --open-2-head: #cddff0; --open-2-body: #e1ecf7; --open-2-line: #a9c4e0;
+}
+.tree-ober.open {
+  background: var(--open-1-head);
+  border-top-color: var(--open-1-line); border-right-color: var(--open-1-line); border-bottom-color: var(--open-1-line);
+}
+.tree-ober.open:not([class*="origin-"]) { border-left-color: var(--open-1-line); }
+.tree-ober.open + .tree-body {
+  background: var(--open-1-body); border-color: var(--open-1-line);
+}
+.tree-unter.open {
+  background: var(--open-2-head); border-radius: 10px 10px 0 0;
+  border-top-color: var(--open-2-line); border-right-color: var(--open-2-line); border-bottom-color: var(--open-2-line);
+}
+.tree-unter.open:not([class*="origin-"]) { border-left-color: var(--open-2-line); }
+.tree-unter.open + .tree-body {
+  background: var(--open-2-body); margin-left: 6px; padding: 4px 8px 10px;
+  border: 1px solid var(--open-2-line); border-top: none; border-radius: 0 0 10px 10px;
+}
+/* Zähler-Pillen auf blauem Grund weiß, sonst verschwimmen sie. */
+.tree-ober.open .grp-stat:not(.done):not(.skip), .tree-unter.open .grp-stat:not(.done):not(.skip) { background: #fff; }
+/* Wochenbericht: Abschnitte wie Oberordner, Gewerke wie Unterordner (gleiche Tönung). */
+.wb-sec.open:not(.missing) { background: var(--open-1-head); border-color: var(--open-1-line); }
+.wb-sec.open + .wb-sec-body { background: var(--open-1-body); border-color: var(--open-1-line); }
+.wb-sec.open .grp-stat:not(.done), .wb-sub.open .grp-stat:not(.done) { background: #fff; }
+.wb-sub.open:not(.missing) { background: var(--open-2-head); border-color: var(--open-2-line); }
+.wb-sub.open { border-radius: 10px 10px 0 0; margin-bottom: 0; }
+.wb-sub.open + .wb-sub-body {
+  background: var(--open-2-body); margin: 0 0 10px 6px; padding: 8px 8px 0;
+  border: 1px solid var(--open-2-line); border-top: none; border-radius: 0 0 10px 10px;
+}
+.tree-ober.open .skip-btn, .tree-unter.open .skip-btn { border-color: var(--open-1-line); }
+/* Als „nicht benötigt" markiert: bleibt grau gestrichelt, auch wenn geöffnet. */
+.tree-ober.open.skipped, .tree-unter.open.skipped { background: #f3f4f6; }
+
+/* ---- Texte korrigieren (Vorschau-Dialog) ---- */
+.tk-info { color: var(--muted); font-size: 14px; margin: 0 0 10px; }
+.tk-feld { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 0 0 12px; }
+.modal label.tk-wahl { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
+.modal label.tk-wahl input { width: 22px; height: 22px; margin: 0; flex: none; }
+.tk-diff { white-space: pre-wrap; font-size: 15px; line-height: 1.5; background: #f7f9fb; border-radius: 8px; padding: 8px 10px; }
+.tk-diff ins, .tk-info ins { background: #d6f5dd; color: #11632a; text-decoration: none; border-radius: 3px; }
+.tk-diff del, .tk-info del { color: var(--warn); opacity: .75; }
+.tk-hinweise { margin: 8px 0 0; padding-left: 20px; color: #9a5b00; font-size: 13px; }
+.tk-hinweise li { margin: 2px 0; }
+.tk-orig { margin-top: 6px; font-size: 13px; color: var(--muted); }
+.tk-orig summary { cursor: pointer; padding: 4px 0; }
+.tk-orig div { white-space: pre-wrap; padding: 6px 10px; border-left: 3px solid var(--line); }
+
+/* ---- Hinweis „Als App installieren" (Startseite) ---- */
+.install-hinweis .bk-msg { font-weight: 400; font-size: 14px; }
+.install-hinweis .bk-msg b { font-weight: 700; }
+
+/* ---- iPhone/Safari ----
+   Datumsfelder: Safari hält sich sonst nicht an die Feldbreite und schiebt sie über den Rand. */
+input[type="date"] {
+  -webkit-appearance: none; appearance: none; min-width: 0; display: block;
+  min-height: calc(1.2em + 26px);
+}
+input[type="date"]::-webkit-date-and-time-value { text-align: left; }
+/* Unterer Rand: Knöpfe und Meldungen nicht unter den Home-Balken des iPhones legen. */
+.modal { padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
+.toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
+.photo-overlay { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
