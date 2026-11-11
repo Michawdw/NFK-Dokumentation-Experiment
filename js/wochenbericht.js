@@ -538,8 +538,8 @@ const Wochenbericht = (() => {
     box.innerHTML = `<div class="wb-fotolabel${fehlt ? ' fehlt' : ''}">${escHtml(label)}</div>
       <div class="vp-photos"></div>
       <div class="toolrow vp-photobtns">
-        <button type="button" class="btn ghost wb-cam">📷 Foto</button>
-        <button type="button" class="btn ghost wb-gal">🖼 Galerie</button>
+        <button type="button" class="btn ghost wb-cam">${Icon('camera')} Foto</button>
+        <button type="button" class="btn ghost wb-gal">${Icon('image')} Galerie</button>
       </div>`;
     box.querySelector('.wb-cam').onclick = () => { fotoZiel = pid; cameraInput.click(); };
     box.querySelector('.wb-gal').onclick = () => { fotoZiel = pid; galleryInput.click(); };
@@ -552,7 +552,7 @@ const Wochenbericht = (() => {
       w.className = 'vp-thumb';
       w.innerHTML = `<img src="${url}" alt="" loading="lazy" />
         <input class="vp-cap" type="text" placeholder="Bildunterschrift" value="${escAttr(ph.caption || '')}" autocomplete="off" />
-        <button type="button" class="vp-del" title="Foto entfernen">✕</button>`;
+        <button type="button" class="vp-del" title="Foto entfernen" aria-label="Foto entfernen">${Icon('x')}</button>`;
       w.querySelector('.vp-cap').onchange = async (ev) => { ph.caption = ev.target.value; await DB.updatePhoto(ph); };
       w.querySelector('.vp-del').onclick = async () => {
         const ok = await App.openConfirm('Foto entfernen?', '<p>Dieses Foto wirklich aus dem Wochenbericht entfernen?</p>', 'Entfernen', true);
@@ -628,7 +628,7 @@ const Wochenbericht = (() => {
           row.insertAdjacentHTML('beforeend', `<label class="vp-textlabel wb-detail">Was ist offen, und warum nicht fertig? (Pflichtfeld)
             <textarea class="vp-text wb-auto wb-btext" rows="2">${escHtml(x.text || '')}</textarea></label>`
             + (pruefen ? `<div class="wb-pruefen"><span>aus der Vorwoche übernommen – bitte prüfen</span>
-                <button type="button" class="btn ghost wb-unveraendert">✓ unverändert</button></div>` : ''));
+                <button type="button" class="btn ghost wb-unveraendert">${Icon('check')} unverändert</button></div>` : ''));
           const ta = row.querySelector('.wb-btext');
           ta.oninput = () => {
             x.text = ta.value; x.bestaetigt = true;
@@ -688,7 +688,7 @@ const Wochenbericht = (() => {
     const card = document.createElement('div');
     card.className = 'wb-item' + (istPflicht(p) ? '' : ' neutral');
     card.dataset.pid = p.id;
-    card.innerHTML = `<div class="wb-q"><span class="wb-check">✓</span>${escHtml(p.titel)}</div>`;
+    card.innerHTML = `<div class="wb-q"><span class="wb-check">${Icon('circle-check')}</span>${escHtml(p.titel)}</div>`;
 
     if (p.typ === 'wahl') {
       const opt = p.optionen.find((o) => o.v === a.status);
@@ -734,7 +734,7 @@ const Wochenbericht = (() => {
       card.insertAdjacentHTML('beforeend', `<textarea class="vp-text wb-auto wb-frei" rows="3" placeholder="Eintragen …">${escHtml(a.text || '')}</textarea>
         <div class="toolrow wb-freibtns">
           <button type="button" class="btn ghost wb-nichts${a.nichts ? ' active' : ''}">${escHtml(p.nichts)}</button>
-          ${p.ausBautagebuch ? '<button type="button" class="btn ghost wb-btb">📋 aus Bautagebuch übernehmen</button>' : ''}
+          ${p.ausBautagebuch ? '<button type="button" class="btn ghost wb-btb">' + Icon('clipboard-list') + ' aus Bautagebuch übernehmen</button>' : ''}
         </div>`);
       const ta = card.querySelector('.wb-frei');
       const nichtsBtn = card.querySelector('.wb-nichts');
@@ -861,7 +861,7 @@ const Wochenbericht = (() => {
   let renderGen = 0;
   let secStand = new Map();     // Abschnitt vollständig? (für den Haken-Effekt)
   let aufgeklappt = null;       // Selektor des gerade geöffneten Ordnerkopfs – wird weich aufgezogen
-  let klappt = false;           // Sperre gegen Doppel-Tippen während des Zuklappens
+  let klappt = false;           // läuft gerade eine Umschaltung? (weitere Tipps werden gemerkt)
   let offenSub = new Set();     // geöffneter Unterordner in Abschnitt 3 (pid), höchstens einer
   const secSel = (sid) => `.wb-sec[data-sid="${sid}"]`;
   const subSel = (pid) => `.wb-sub[data-pid="${pid}"]`;
@@ -878,8 +878,16 @@ const Wochenbericht = (() => {
   // stehen; ein frisch geöffneter Ordner gleitet danach unter die Kopfleiste (render()).
   // ebene: '.wb-sec' oder '.wb-sub'; umschalten() stellt offen/offenSub um und liefert, ob
   // der Ordner jetzt offen ist.
+  // Kein Input-Lockout (v84.3): Tipp während einer laufenden Umschaltung wird gemerkt (der
+  // jüngste zählt), die Zuklapp-Animation sofort beendet, danach läuft der Tipp regulär.
+  let wartend = null;
+  let zuBody = null;
   async function klappen(ebene, anker, umschalten) {
-    if (klappt) return;
+    if (klappt) {
+      wartend = { ebene, anker, umschalten };
+      if (zuBody && zuBody.getAnimations) zuBody.getAnimations().forEach((a) => { try { a.finish(); } catch (e) { /* egal */ } });
+      return;
+    }
     klappt = true;
     try {
       const kopf = document.querySelector(`#wbAbschnitte ${ebene}.open`);
@@ -887,7 +895,9 @@ const Wochenbericht = (() => {
       if (body && (body.classList.contains('wb-sec-body') || body.classList.contains('wb-sub-body'))) {
         kopf.classList.add('zu');
         const halt = App.halteKopf(document.querySelector(anker));
+        zuBody = body;
         await App.animClose(body);
+        zuBody = null;
         halt.jetzt();
         halt.stop();
       }
@@ -895,6 +905,12 @@ const Wochenbericht = (() => {
       await render(anker);
     } finally {
       klappt = false;
+      zuBody = null;
+    }
+    if (wartend) {
+      const w = wartend;
+      wartend = null;
+      await klappen(w.ebene, w.anker, w.umschalten);
     }
   }
 
@@ -963,9 +979,9 @@ const Wochenbericht = (() => {
       head.type = 'button';
       head.className = 'wb-sec' + (offen.has(s.id) ? ' open' : '');
       head.dataset.sid = s.id;
-      head.innerHTML = `<span class="chev">▶</span>
+      head.innerHTML = `<span class="chev">${Icon('chevron-right')}</span>
         <span class="wb-sec-name">${i + 1}. ${escHtml(s.titel)}</span>
-        <span class="grp-check wb-sec-check" hidden>✓</span>
+        <span class="grp-check wb-sec-check" hidden>${Icon('circle-check')}</span>
         <span class="grp-stat wb-sec-stat"></span>`;
       // Immer nur ein Abschnitt offen; beim Wechsel sind dessen Unterordner wieder zu.
       head.onclick = () => klappen('.wb-sec', secSel(s.id), () => {
@@ -985,9 +1001,9 @@ const Wochenbericht = (() => {
         sub.type = 'button';
         sub.className = 'wb-sub' + (offenSub.has(p.id) ? ' open' : '');
         sub.dataset.pid = p.id;
-        sub.innerHTML = `<span class="chev">▶</span>
+        sub.innerHTML = `<span class="chev">${Icon('chevron-right')}</span>
           <span class="wb-sub-name">${escHtml(p.titel)}</span>
-          <span class="grp-check wb-sub-check" hidden>✓</span>
+          <span class="grp-check wb-sub-check" hidden>${Icon('circle-check')}</span>
           <span class="grp-stat wb-sub-stat"></span>`;
         sub.onclick = () => klappen('.wb-sub', subSel(p.id), () => {
           const auf = !offenSub.has(p.id);
@@ -1041,8 +1057,8 @@ const Wochenbericht = (() => {
           <div class="da-date">${escHtml(kwText(b.kw))} · ${escHtml(zeitraumText(b.kw))}</div>
           <div class="da-snip">${escHtml((b.gespraechspartner ? 'Gesprächspartner: ' + b.gespraechspartner + ' · ' : '') + info)}</div>
         </div>
-        <span class="da-go">öffnen ›</span>
-        <button class="da-del" title="Bericht löschen">🗑</button>`;
+        <span class="da-go">öffnen ${Icon('chevron-right', 'i-sm')}</span>
+        <button class="da-del" title="Bericht löschen" aria-label="Bericht löschen">${Icon('trash-2')}</button>`;
       const open = async () => { await oeffne(b.kw); window.scrollTo(0, 0); };
       div.querySelector('.da-main').onclick = open;
       div.querySelector('.da-go').onclick = open;
@@ -1140,7 +1156,7 @@ const Wochenbericht = (() => {
     await render();                        // setzt über aktualisiere() die roten Markierungen
     const kopf = $('#wbKopf');
     const erstes = !kopfFertig() ? kopf : document.querySelector('.wb-item.missing, .wb-sub.missing');
-    if (erstes) erstes.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (erstes) erstes.scrollIntoView({ behavior: App.sanft(), block: 'center' });
     return fehlend.length + (kopfFertig() ? 0 : 1);
   }
 

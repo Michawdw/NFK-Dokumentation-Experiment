@@ -50,7 +50,7 @@ const App = (() => {
   }
 
   function animiereView(view, zurueck) {
-    if (!view || reduceMotion.matches) return;
+    if (!view) return;               // bei „Bewegung reduzieren“ macht CSS daraus eine Überblendung
     view.classList.remove('enter-fwd', 'enter-back', 'view-start-anim');
     void view.offsetWidth;            // Animation auch bei schnellem Hin und Her neu starten
     view.classList.add(zurueck ? 'enter-back' : 'enter-fwd');
@@ -94,8 +94,10 @@ const App = (() => {
   // „Bewegung reduzieren" eingestellt hat, bekommt alles sofort und ohne Animation.
   const reduceMotion = window.matchMedia
     ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
-  const DUR = 220, DUR_FAST = 150;
-  const EASE = 'cubic-bezier(.2,.7,.2,1)';
+  const DUR = 200, DUR_FAST = 150;
+  const EASE = 'cubic-bezier(0.23, 1, 0.32, 1)';   // = --ease in styles.css
+  // Scroll-Verhalten: weich, außer bei „Bewegung reduzieren“.
+  const sanft = () => (reduceMotion.matches ? 'auto' : 'smooth');
   const ohneAnimation = (el) => !el || reduceMotion.matches || typeof el.animate !== 'function';
   // Lange Inhalte (Ordner mit vielen Bildern) werden nur über den sichtbaren Teil animiert:
   // Was unterhalb des Bildschirmrands liegt, sieht ohnehin niemand – so bleibt die
@@ -110,6 +112,11 @@ const App = (() => {
 
   // Aufklappen: Höhe 0 → natürliche Höhe. Das Element steht bereits fertig im DOM.
   function animOpen(el, obenBei) {
+    // „Bewegung reduzieren": keine Höhen-Bewegung, nur kurz einblenden.
+    if (el && reduceMotion.matches && typeof el.animate === 'function') {
+      el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 150, easing: 'ease' });
+      return;
+    }
     if (ohneAnimation(el)) return;
     const h = el.offsetHeight;
     if (!h) return;
@@ -151,33 +158,34 @@ const App = (() => {
       const a = el.animate([
         { height: start + 'px', paddingTop: cs.paddingTop, paddingBottom: cs.paddingBottom, opacity: 1 },
         { height: '0px', paddingTop: '0px', paddingBottom: '0px', opacity: 0 },
-      ], { duration: DUR_FAST + 30, easing: 'ease-in', fill: 'forwards' });
+      ], { duration: DUR_FAST + 30, easing: EASE, fill: 'forwards' });   // kein ease-in: Reaktion sofort sichtbar
       beiEnde(a, DUR_FAST + 30, resolve);
     });
   }
 
-  // Overlays (Dialog, Bild-Großansicht): Öffnen spielt die CSS-Animation automatisch ab,
-  // Schließen blendet erst aus und setzt dann hidden. Öffnet währenddessen schon der
-  // nächste Dialog (Rückfrage direkt nach der vorigen), wird das Ausblenden abgebrochen.
+  // Overlays (Dialog, Bild-Großansicht): Ein-/Ausblenden übernimmt js/sheet.js – immer vom
+  // aktuellen Stand aus. Schließen blendet erst aus und setzt dann hidden. Öffnet
+  // währenddessen schon der nächste Dialog (Rückfrage direkt nach der vorigen), kehrt die
+  // Bewegung einfach um; das abgelöste Schließen meldet sich dann nicht mehr (kein hidden).
   function openOverlay(o) {
-    clearTimeout(o._schliessen);
-    o.classList.remove('closing');
+    const warVersteckt = o.hidden;
+    o._zu = null;
     o.hidden = false;
+    Sheet.zeigen(o, warVersteckt);
   }
   function closeOverlay(o, danach) {
-    clearTimeout(o._schliessen);
-    if (o.hidden || reduceMotion.matches) {
-      o.classList.remove('closing');
-      o.hidden = true;
+    if (o.hidden) {
       if (danach) danach();
       return;
     }
-    o.classList.add('closing');
-    o._schliessen = setTimeout(() => {
-      o.classList.remove('closing');
+    const auftrag = {};
+    o._zu = auftrag;
+    Sheet.verbergen(o, () => {
+      if (o._zu !== auftrag) return;      // inzwischen wieder geöffnet
+      o._zu = null;
       o.hidden = true;
       if (danach) danach();
-    }, DUR_FAST);
+    });
   }
 
   // Lade-Anzeige für Knöpfe mit längerer Arbeit (Export): Kringel am Knopf, gegen
@@ -195,7 +203,7 @@ const App = (() => {
 
   // „✓ erledigt"-Haken kurz aufspringen lassen.
   function pop(el) {
-    if (!el || reduceMotion.matches) return;
+    if (!el) return;                 // bei „Bewegung reduzieren“ nur Einblenden (CSS)
     el.classList.remove('pop');
     void el.offsetWidth;            // Animation neu starten
     el.classList.add('pop');
@@ -205,13 +213,14 @@ const App = (() => {
   function toast(msg, ms = 2600) {
     const t = $('#toast');
     t.textContent = msg;
-    t.classList.remove('closing');
-    t.hidden = false;
     clearTimeout(t._timer);
+    // Ein- und Ausblenden per CSS-Transition (.zeigen): eine neue Meldung während des
+    // Ausblendens kehrt die Bewegung vom aktuellen Stand aus um.
+    if (t.hidden) { t.hidden = false; void t.offsetWidth; }
+    t.classList.add('zeigen');
     t._timer = setTimeout(() => {
-      if (reduceMotion.matches) { t.hidden = true; return; }
-      t.classList.add('closing');
-      t._timer = setTimeout(() => { t.hidden = true; t.classList.remove('closing'); }, DUR_FAST);
+      t.classList.remove('zeigen');
+      t._timer = setTimeout(() => { t.hidden = true; }, 250);
     }, ms);
   }
   // Eine laufende Meldung („Führe Bilder zusammen…") darf nicht über einer Rückfrage stehen –
@@ -221,7 +230,7 @@ const App = (() => {
     const t = $('#toast');
     if (!t) return;
     clearTimeout(t._timer);
-    t.classList.remove('closing');
+    t.classList.remove('zeigen');
     t.hidden = true;
   }
 
@@ -354,7 +363,7 @@ const App = (() => {
       $('#modalTitle').textContent = title;
       $('#modalBody').innerHTML = html + '<div class="bigchoice">' + optionen.map((o) =>
         `<button type="button" class="bigbtn${o.cls ? ' ' + escAttr(o.cls) : ''}" data-key="${escAttr(o.key)}">
-           <span class="bigbtn-emoji">${escHtml(o.emoji || '')}</span>
+           <span class="bigbtn-emoji">${o.icon ? Icon(o.icon) : escHtml(o.emoji || '')}</span>
            <span class="bigbtn-title">${escHtml(o.titel)}</span>
            <span class="bigbtn-sub">${escHtml(o.sub || '')}</span>
          </button>`).join('') + '</div>';
@@ -415,7 +424,7 @@ const App = (() => {
       toast('Bitte zuerst die Stammdaten ausfüllen und speichern.');
     } else {
       const btn = f.querySelector('button[type="submit"]');
-      if (btn) btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (btn) btn.scrollIntoView({ behavior: sanft(), block: 'center' });
       toast('Bitte die Stammdaten erst speichern.');
     }
   }
@@ -511,14 +520,15 @@ const App = (() => {
     const liste = document.createElement('div');
     liste.className = 'job-more-list';
     weitere.forEach((j) => liste.appendChild(jobItem(j, false)));
-    knopf.innerHTML = `<span class="chev">▶</span>Weitere Aufträge (${weitere.length})`;
+    knopf.innerHTML = `<span class="chev">${Icon('chevron-right')}</span>Weitere Aufträge (${weitere.length})`;
     const zeige = () => {
       liste.hidden = !weitereOffen;
       knopf.classList.toggle('open', weitereOffen);
       knopf.setAttribute('aria-expanded', String(weitereOffen));
     };
     knopf.onclick = async () => {
-      if (knopf._klappt) return;
+      // Kein Input-Lockout: Tipp während des Zuklappens kürzt es ab und wird danach ausgeführt.
+      if (knopf._klappt) { knopf._wartend = true; abkuerzen(liste); return; }
       weitereOffen = !weitereOffen;
       if (weitereOffen) { zeige(); animOpen(liste); return; }
       knopf._klappt = true;
@@ -531,6 +541,7 @@ const App = (() => {
       if (liste.getAnimations) liste.getAnimations().forEach((a) => a.cancel());
       liste.style.overflow = '';
       zeige();
+      if (knopf._wartend) { knopf._wartend = false; knopf.onclick(); }
     };
     zeige();
     cont.appendChild(knopf);
@@ -545,8 +556,8 @@ const App = (() => {
         <div class="job-name">${escHtml(j.name || j.header.filiale || 'Auftrag')}</div>
         <div class="job-sub">${escHtml(sub)}</div>
       </div>
-      <button class="job-edit" title="Umbenennen">✎</button>
-      <button class="job-del" title="Löschen">🗑</button>`;
+      <button class="job-edit" title="Umbenennen" aria-label="Umbenennen">${Icon('pencil')}</button>
+      <button class="job-del" title="Löschen" aria-label="Löschen">${Icon('trash-2')}</button>`;
     div.querySelector('.job-main').onclick = () => { if (!active) switchJob(j.id); };
     div.querySelector('.job-edit').onclick = (e) => { e.stopPropagation(); renameJob(j); };
     div.querySelector('.job-del').onclick = (e) => { e.stopPropagation(); deleteJobFlow(j); };
@@ -608,9 +619,9 @@ const App = (() => {
     const wahl = await openAuswahl('Auftrag anlegen',
       '<p class="hint">Beginnt hier eine neue Baustelle, oder wird eine laufende übernommen?</p>',
       [
-        { key: 'neu', emoji: '🏗', titel: 'Neue Baustelle',
+        { key: 'neu', icon: 'hard-hat', titel: 'Neue Baustelle',
           sub: 'Stammdaten ausfüllen, danach die Vorprüfung' },
-        { key: 'uebernahme', emoji: '📥', titel: 'Baustelle übernehmen',
+        { key: 'uebernahme', icon: 'download', titel: 'Baustelle übernehmen',
           sub: 'Übergabe-Datei (.xlsx) oder Bilddoku-ZIP einlesen – Stammdaten kommen mit',
           sofort: () => $('#startImport').click() },
       ]);
@@ -680,7 +691,7 @@ const App = (() => {
       const knapp = !!sp && speicherKnapp(sp);
       warn.hidden = !knapp;
       if (knapp) {
-        warn.innerHTML = `<span class="bk-msg">⚠ Speicher wird knapp (noch ca. ${escHtml(groesse(sp.frei))} frei). `
+        warn.innerHTML = `<span class="bk-msg">Speicher wird knapp (noch ca. ${escHtml(groesse(sp.frei))} frei). `
           + 'Abgeschlossene Aufträge sichern (ZIP) und danach löschen – sonst können bald keine Bilder mehr gespeichert werden.</span>';
       }
     }
@@ -693,6 +704,7 @@ const App = (() => {
     if (wahl) wahl.classList.toggle('gesperrt', gesperrt);
     const hinweis = $('#sperreHinweis');
     if (hinweis) hinweis.hidden = !gesperrt;
+    UI.aktualisieren(currentJob);   // Kopfleiste + Stammdaten-Karte (nur Darstellung, js/ui.js)
   }
 
   // Zeigt auf der Startseite den Vorprüfungs-Status des aktiven Auftrags (Link zur View).
@@ -709,11 +721,11 @@ const App = (() => {
     el.hidden = false;
     if (done) {
       el.className = 'vp-status ok';
-      el.innerHTML = `<span>🔍 Vorprüfung ✓ abgeschlossen</span>
-        <button type="button" class="btn ghost vp-open">📄 Protokoll / ansehen</button>`;
+      el.innerHTML = `<span>Vorprüfung abgeschlossen</span>
+        <button type="button" class="btn ghost vp-open">${Icon('file-text')} Protokoll / ansehen</button>`;
     } else {
       el.className = 'vp-status open';
-      el.innerHTML = `<span>🔍 Vorprüfung offen (${answered}/${total} beantwortet)</span>
+      el.innerHTML = `<span>Vorprüfung offen (${answered}/${total} beantwortet)</span>
         <button type="button" class="btn primary vp-open">Vorprüfung öffnen</button>`;
     }
     const btn = el.querySelector('.vp-open');
@@ -750,17 +762,17 @@ const App = (() => {
     if (unsaved > 0) {
       cls = (!last || days >= 1) ? 'warn' : 'info';
       msg = !last
-        ? `⚠ Noch nie gesichert – ${photos.length} Bild${photos.length === 1 ? '' : 'er'} nur auf diesem Handy.`
-        : `⚠ ${unsaved} neue${unsaved === 1 ? 's Bild' : ' Bilder'} seit der letzten Sicherung (${ago}).`;
+        ? `Noch nie gesichert – ${photos.length} Bild${photos.length === 1 ? '' : 'er'} nur auf diesem Handy.`
+        : `${unsaved} neue${unsaved === 1 ? 's Bild' : ' Bilder'} seit der letzten Sicherung (${ago}).`;
     } else {
       cls = 'ok';
-      msg = `✓ Alle Bilder gesichert (zuletzt ${ago}).`;
+      msg = `Alle Bilder gesichert (zuletzt ${ago}).`;
     }
 
     el.className = 'backup-banner ' + cls;
     el.hidden = false;
     el.innerHTML = `<span class="bk-msg"></span>` +
-      `<button type="button" class="btn primary bk-save">💾 Jetzt sichern</button>`;
+      `<button type="button" class="btn primary bk-save">${Icon('save')} Jetzt sichern</button>`;
     el.querySelector('.bk-msg').textContent = msg;
     el.querySelector('.bk-save').onclick = busy(doBackupNow);
   }
@@ -924,6 +936,34 @@ const App = (() => {
         + escHtml(n) + (fehlt ? ' (nicht mehr verfügbar)' : '') + '</option>';
     }).join('');
     if (!names.length) sel.innerHTML = '<option value="">— keine Vorlage —</option>';
+    passeVorlagenSchrift();
+  }
+
+  // Ein <select> kann nicht umbrechen: Auf dem Handy war „NFK Vollverkabelung 3x43HE" bei
+  // 15 px abgeschnitten („NFK Vollverkabelun…"). Die Schrift wird deshalb so weit verkleinert
+  // (15 → mind. 11 px), dass der gewählte Name ganz hineinpasst. Ein ResizeObserver rechnet
+  // neu, sobald das Feld sichtbar wird oder sich die Breite ändert (Drehen, Fenstergröße).
+  const VORLAGE_SCHRIFT = { max: 15, min: 11 };
+  let vorlagenMessung = null;
+  function passeVorlagenSchrift() {
+    const sel = $('#templateSelect');
+    if (!sel) return;
+    if (!sel._beobachtet && window.ResizeObserver) {
+      sel._beobachtet = true;
+      new ResizeObserver(() => passeVorlagenSchrift()).observe(sel);
+    }
+    const opt = sel.options[sel.selectedIndex];
+    const text = opt ? opt.textContent : '';
+    const cs = getComputedStyle(sel);
+    // Platz für den Text: Breite minus Innenabstand links und Pfeil rechts (≈ 36 px, mit Sicherheitsrand – bei 28 px kappte Chrome noch die letzten Zeichen).
+    const platz = sel.clientWidth - parseFloat(cs.paddingLeft) - 36;
+    if (!text || platz <= 0) return;
+    vorlagenMessung = vorlagenMessung || document.createElement('canvas').getContext('2d');
+    vorlagenMessung.font = `${cs.fontWeight} ${VORLAGE_SCHRIFT.max}px ${cs.fontFamily}`;
+    const breite = vorlagenMessung.measureText(text).width;
+    const groesse = Math.max(VORLAGE_SCHRIFT.min,
+      Math.min(VORLAGE_SCHRIFT.max, Math.floor(VORLAGE_SCHRIFT.max * platz / breite * 10) / 10));
+    sel.style.fontSize = groesse + 'px';
   }
 
   // Rückmeldung zum Umzug beim Vorlagenwechsel (siehe Structure.uebernehmeStruktur).
@@ -1133,8 +1173,17 @@ const App = (() => {
   }
   // Klick auf eine Ordner-Kopfzeile: den offenen Ordner dieser Ebene erst sichtbar zuklappen,
   // dann den neuen Zustand zeichnen. sel = Kopfzeilen-Klasse der Ebene.
+  // Kein Input-Lockout (v84.3): Ein Tipp während einer laufenden Umschaltung geht nicht
+  // verloren. Er wird gemerkt (nur der jüngste zählt), die laufende Zuklapp-Animation wird
+  // sofort zu Ende geführt, danach läuft der gemerkte Tipp regulär durch denselben Ablauf.
+  let treeWartend = null;
+  let treeZuBody = null;
   async function treeUmschalten(sel, umschalten, anker) {
-    if (treeKlappt) return;
+    if (treeKlappt) {
+      treeWartend = { sel, umschalten, anker };
+      abkuerzen(treeZuBody);
+      return;
+    }
     treeKlappt = true;
     try {
       const kopf = $(`#structureTree ${sel}.open`);
@@ -1153,8 +1202,10 @@ const App = (() => {
           body.style.overflow = 'hidden';
           halt.jetzt();
         }
+        treeZuBody = body;
         const zu = animClose(body);
         await zu;
+        treeZuBody = null;
         halt.jetzt();
         halt.stop();
       }
@@ -1162,7 +1213,18 @@ const App = (() => {
       await renderTree(anker);
     } finally {
       treeKlappt = false;
+      treeZuBody = null;
     }
+    if (treeWartend) {
+      const w = treeWartend;
+      treeWartend = null;
+      await treeUmschalten(w.sel, w.umschalten, w.anker);
+    }
+  }
+
+  // Laufende Klapp-Animation eines Ordnerinhalts sofort in den Endzustand bringen.
+  function abkuerzen(el) {
+    if (el && el.getAnimations) el.getAnimations().forEach((a) => { try { a.finish(); } catch (e) { /* egal */ } });
   }
 
   // Hält eine Kopfzeile während einer Animation auf derselben Bildschirmhöhe (scrollt Bild
@@ -1245,14 +1307,14 @@ const App = (() => {
         + (oberAllDone ? ' alldone' : '') + (oberNotNeeded ? ' skipped' : '')
         + (oberOrigin ? ' origin-' + oberOrigin.cls : '');
       if (!oberNotNeeded) head.style.setProperty('--p', needed.length ? (oberDone / needed.length).toFixed(3) : 0);
-      head.innerHTML = `<span class="chev">▶</span>
+      head.innerHTML = `<span class="chev">${Icon('chevron-right')}</span>
         <span class="grp-name">${escHtml(ober)}${oberOrigin ? ` <span class="origin-tag ${oberOrigin.cls}" title="${escAttr(oberOrigin.title)}">${escHtml(oberOrigin.short)}</span>` : ''}</span>
-        ${oberAllDone ? '<span class="grp-check" title="alle Pflichtbilder erledigt">✓</span>' : ''}
+        ${oberAllDone ? '<span class="grp-check" title="alle Pflichtbilder erledigt">' + Icon('circle-check') + '</span>' : ''}
         ${oberNotNeeded
           ? '<span class="grp-stat skip">nicht benötigt</span>'
           : `<span class="grp-stat${oberAllDone ? ' done' : ''}">${oberDone}/${needed.length}</span>`}
-        <button class="skip-btn" title="${oberSkip ? 'wieder benötigt' : 'als nicht benötigt markieren'}">${oberSkip ? '↩' : '∅'}</button>
-        ${oberOrigin ? '<button class="del-btn" title="Bereich mit allen Positionen löschen">🗑</button>' : ''}`;
+        <button class="skip-btn" title="${oberSkip ? 'wieder benötigt' : 'als nicht benötigt markieren'}" aria-label="${oberSkip ? 'wieder benötigt' : 'als nicht benötigt markieren'}">${Icon(oberSkip ? 'rotate-ccw' : 'circle-slash')}</button>
+        ${oberOrigin ? '<button class="del-btn" title="Bereich mit allen Positionen löschen" aria-label="Bereich mit allen Positionen löschen">' + Icon('trash-2') + '</button>' : ''}`;
       head.dataset.ober = ober;
       // Immer nur ein Oberordner offen; beim Wechsel sind dessen Unterordner wieder zu.
       head.onclick = () => treeUmschalten('.tree-ober', () => {
@@ -1294,14 +1356,14 @@ const App = (() => {
             + (uAllDone ? ' alldone' : '') + (uNotNeeded ? ' skipped' : '')
             + (uOrigin ? ' origin-' + uOrigin.cls : '');
           if (!uNotNeeded) uHead.style.setProperty('--p', uNeeded.length ? (uDone / uNeeded.length).toFixed(3) : 0);
-          uHead.innerHTML = `<span class="chev">▶</span>
+          uHead.innerHTML = `<span class="chev">${Icon('chevron-right')}</span>
             <span class="grp-name">${escHtml(uk)}${uOrigin ? ` <span class="origin-tag ${uOrigin.cls}" title="${escAttr(uOrigin.title)}">${escHtml(uOrigin.short)}</span>` : ''}</span>
-            ${uAllDone ? '<span class="grp-check" title="alle Pflichtbilder erledigt">✓</span>' : ''}
+            ${uAllDone ? '<span class="grp-check" title="alle Pflichtbilder erledigt">' + Icon('circle-check') + '</span>' : ''}
             ${uNotNeeded
               ? '<span class="grp-stat skip">nicht benötigt</span>'
               : `<span class="grp-stat${uAllDone ? ' done' : ''}">${uDone}/${uNeeded.length}</span>`}
-            <button class="skip-btn" title="${uSkip ? 'wieder benötigt' : 'als nicht benötigt markieren'}">${uSkip ? '↩' : '∅'}</button>
-            ${uOrigin ? '<button class="del-btn" title="Unterordner mit allen Positionen löschen">🗑</button>' : ''}`;
+            <button class="skip-btn" title="${uSkip ? 'wieder benötigt' : 'als nicht benötigt markieren'}" aria-label="${uSkip ? 'wieder benötigt' : 'als nicht benötigt markieren'}">${Icon(uSkip ? 'rotate-ccw' : 'circle-slash')}</button>
+            ${uOrigin ? '<button class="del-btn" title="Unterordner mit allen Positionen löschen" aria-label="Unterordner mit allen Positionen löschen">' + Icon('trash-2') + '</button>' : ''}`;
           uHead.dataset.unter = uKey;
           // Immer nur ein Unterordner offen.
           uHead.onclick = () => treeUmschalten('.tree-unter', () => {
@@ -1381,7 +1443,7 @@ const App = (() => {
       // Position auf „nicht benötigt" steht.
       statusLine = 'nicht benötigt';
     } else {
-      statusLine = n.done ? '<span class="row-check">✓</span> erledigt' : 'offen';
+      statusLine = n.done ? '<span class="row-check">' + Icon('check') + '</span> erledigt' : 'offen';
       // Vom Vorteam übernommene Bilder (per Übergabe-Import): liegen nicht physisch
       // auf diesem Gerät, zählen aber als erledigt. Klar als „Vorteam" kennzeichnen.
       if (n.prior > 0) {
@@ -1396,10 +1458,10 @@ const App = (() => {
       <div class="name-count">${statusLine}${originTag(n)}</div>
       <div class="thumbs"></div>
       <div class="name-actions">
-        <button class="skip-btn" title="${nodeSkip ? 'wieder benötigt' : 'als nicht benötigt markieren'}">${nodeSkip ? '↩' : '∅'}</button>
-        <button class="gal-btn" title="Aus Galerie">🖼️</button>
-        <button class="cam-btn" title="Foto aufnehmen">📷</button>
-        ${origin ? '<button class="del-btn" title="Eigenen Namen löschen">🗑</button>' : ''}
+        <button class="skip-btn" title="${nodeSkip ? 'wieder benötigt' : 'als nicht benötigt markieren'}" aria-label="${nodeSkip ? 'wieder benötigt' : 'als nicht benötigt markieren'}">${Icon(nodeSkip ? 'rotate-ccw' : 'circle-slash')}</button>
+        <button class="gal-btn" title="Aus Galerie" aria-label="Aus Galerie">${Icon('image')}</button>
+        <button class="cam-btn" title="Foto aufnehmen" aria-label="Foto aufnehmen">${Icon('camera')}</button>
+        ${origin ? '<button class="del-btn" title="Eigenen Namen löschen" aria-label="Eigenen Namen löschen">' + Icon('trash-2') + '</button>' : ''}
       </div>`;
 
     row.querySelector('.skip-btn').onclick = () => toggleSkip('nodes', n.key);
@@ -1410,13 +1472,15 @@ const App = (() => {
 
     const thumbs = row.querySelector('.thumbs');
     const photos = await DB.getPhotos(currentJob.id, n.key);
+    const bilder = [];      // alle Bilder dieser Position – in der Großansicht durchblätterbar
     for (const p of photos) {
       const url = URL.createObjectURL(p.blob);
       (urls || activeUrls).push(url);
       const wrap = document.createElement('div');
       wrap.className = 'thumb-wrap';
       wrap.innerHTML = `<img src="${url}" alt="" loading="lazy" /><span class="thumb-seq">${String(p.seq).padStart(2, '0')}</span>`;
-      wrap.onclick = () => openPhotoViewer(n, p, url);
+      bilder.push({ photo: p, url, thumb: wrap });
+      wrap.onclick = () => openPhotoViewer(n, p, url, bilder);
       thumbs.appendChild(wrap);
     }
     return row;
@@ -1424,23 +1488,24 @@ const App = (() => {
 
   // Bild groß anzeigen (damit auf dem Handy erkennbar ist, um welches Bild es geht)
   // mit der Möglichkeit, genau dieses Bild zu löschen.
-  function openPhotoViewer(node, photo, url) {
-    const overlay = $('#photoOverlay');
-    $('#photoTitle').textContent = node.bildname;
-    $('#photoSub').textContent = 'Bild ' + String(photo.seq).padStart(2, '0') +
-      (node.unter ? ' · ' + node.unter : '') + ' · ' + node.ober;
-    $('#photoImg').src = url;
-    openOverlay(overlay);
+  // Ab v84.4 Vollbild wie iOS Fotos (js/fotoansicht.js): blättern durch alle Bilder dieser
+  // Position (bilder), Wischen nach unten schließt, Zoom. Gelöscht wird das gerade gezeigte Bild.
+  function openPhotoViewer(node, photo, url, bilder) {
+    const liste = (bilder && bilder.length) ? bilder : [{ photo, url, thumb: null }];
+    const start = Math.max(0, liste.findIndex((b) => b.photo.id === photo.id));
+    Fotoansicht.oeffnen({
+      liste,
+      index: start,
+      beschriftung: (b) => ({
+        titel: node.bildname,
+        sub: 'Bild ' + String(b.photo.seq).padStart(2, '0') + (node.unter ? ' · ' + node.unter : '') + ' · ' + node.ober,
+      }),
+      loeschen: (b) => bildLoeschen(node, b.photo),
+    });
+  }
 
-    const close = () => {
-      overlay.onclick = null;
-      // Object-URL nicht länger als nötig binden – aber erst nach dem Ausblenden lösen.
-      closeOverlay(overlay, () => { if (overlay.hidden) $('#photoImg').removeAttribute('src'); });
-    };
-    $('#photoClose').onclick = close;
-    overlay.onclick = (e) => { if (e.target === overlay) close(); }; // daneben tippen = schließen
-
-    $('#photoDelete').onclick = async () => {
+  async function bildLoeschen(node, photo) {
+    {
       const ok = await openConfirm(
         'Bild löschen?',
         `<p>Bild <b>${String(photo.seq).padStart(2, '0')}</b> von
@@ -1449,7 +1514,9 @@ const App = (() => {
          dieser Position werden anschließend neu durchnummeriert.</p>`,
         'Löschen', true);
       if (!ok) return;
-      close();
+      // Erst schließen (fliegt ins Vorschaubild zurück), dann löschen und neu aufbauen –
+      // der Neuaufbau gibt die Vorschaubilder frei, die die Ansicht noch zeigt.
+      await Fotoansicht.schliessen();
       try {
         await Photos.deleteFromNode(node.key, photo.id);
         await renderTree();
@@ -1459,7 +1526,7 @@ const App = (() => {
         console.error(err);
         toast('Fehler beim Löschen des Bildes');
       }
-    };
+    }
   }
 
   // Versteckte File-Inputs (Kamera mit capture, Galerie ohne) gemeinsam genutzt.
@@ -1518,7 +1585,7 @@ const App = (() => {
   async function addCustomNameFlow() {
     const nodes = await Structure.getMerged();
     const obers = Array.from(new Set(nodes.map((n) => n.ober)));
-    const oberOptions = [{ value: '__new__', label: '➕ Neuer Bereich…' }]
+    const oberOptions = [{ value: '__new__', label: '+ Neuer Bereich…' }]
       .concat(obers.map((o) => ({ value: o, label: o })));
 
     // Unterordner je Bereich – eigene Unterordner stecken in den Custom-Namen und tauchen
@@ -1527,7 +1594,7 @@ const App = (() => {
       const unters = Array.from(new Set(nodes.filter((n) => n.ober === ober && n.unter).map((n) => n.unter)));
       return [{ value: '__none__', label: '– keiner (direkt im Bereich) –' }]
         .concat(unters.map((u) => ({ value: u, label: u })))
-        .concat([{ value: '__new__', label: '➕ Neuer Unterordner…' }]);
+        .concat([{ value: '__new__', label: '+ Neuer Unterordner…' }]);
     };
     const startOber = obers[0] || '__new__';
 
@@ -1757,8 +1824,8 @@ const App = (() => {
           <div class="da-date">${titel}</div>
           <div class="da-snip">${escHtml(snippet || '—')}</div>
         </div>
-        <span class="da-go">öffnen ›</span>
-        <button class="da-del" title="Löschen">🗑</button>`;
+        <span class="da-go">öffnen ${Icon('chevron-right', 'i-sm')}</span>
+        <button class="da-del" title="Löschen" aria-label="Löschen">${Icon('trash-2')}</button>`;
       div.querySelector('.da-main').onclick = async () => {
         await flushDiary();            // aktuellen Tag sichern, bevor ein anderer geladen wird
         diaryDate = day.datum;
@@ -2017,12 +2084,12 @@ const App = (() => {
     div.innerHTML = `
       <div class="dr-head">
         <span class="dr-title"></span>
-        <button type="button" class="dr-del" title="Techniker entfernen" aria-label="Techniker entfernen">✕</button>
+        <button type="button" class="dr-del" title="Techniker entfernen" aria-label="Techniker entfernen">${Icon('x')}</button>
       </div>
       <input class="dr-name" type="text" placeholder="Name" value="${escAttr(r.name || '')}" autocomplete="off" />
       <input class="dr-name2" type="text" placeholder="2. Techniker (gleiche Zeiten)" value="${escAttr(name2)}" autocomplete="off"${name2 ? '' : ' hidden'} />
       <button type="button" class="dr-add2" hidden>+ 2. Techniker (gleiche Zeiten)</button>
-      <button type="button" class="btn ghost dr-copy">⏱ Zeiten von Techniker 1 übernehmen</button>
+      <button type="button" class="btn ghost dr-copy">${Icon('copy')} Zeiten von Techniker 1 übernehmen</button>
       <div class="dr-times">
         ${timeFieldHtml('dr-start', 'Start', r.start)}
         ${timeFieldHtml('dr-ende', 'Ende', r.ende)}
@@ -2265,7 +2332,7 @@ const App = (() => {
       `<p>${links}, ${rechts}.</p><p>Trotzdem ${aktion}?</p>`, 'Trotzdem', false, 'Korrigieren');
     if (!ok) {
       const feld = $('#diaryForm').anzTechniker;
-      feld.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      feld.scrollIntoView({ behavior: sanft(), block: 'center' });
       feld.focus();
     }
     return ok;
@@ -2344,15 +2411,15 @@ const App = (() => {
     $('#newJobBtn').onclick = newJobFlow;
     $('#importTemplate').addEventListener('change', importTemplate);
     $('#templateSelect').addEventListener('change', onTemplateChange);
+    $('#templateSelect').addEventListener('change', passeVorlagenSchrift);
     $('#tplRefreshBtn').onclick = refreshCatalog;
     $('#addCustomBtn').onclick = addCustomNameFlow;
     $('#overviewBtn').onclick = () => Overview.show();
     // ZIP-Export = vollständige Sicherung: über doBackupNow, damit der Zeitpunkt
     // gemerkt und die Backup-Erinnerung aktualisiert wird.
     $('#exportZipBtn').onclick = busy(doBackupNow);
-    $('#handoverExportBtn').onclick = busy(handoverExport);
-    // Beide Knöpfe nehmen beides an (.xlsx wie .zip) – importAnyFile entscheidet.
-    $('#handoverImport').addEventListener('change', importAnyFile);
+    // Nimmt beides an (.xlsx wie .zip) – importAnyFile entscheidet. Die früheren Knöpfe
+    // „Übergabe export/import" sind seit v84.5 entfallen (ZIP enthält die Übergabe-Datei).
     $('#mergeImport').addEventListener('change', importAnyFile);
     // Derselbe Import auch auf der Startseite: die Knöpfe in der Bilddoku sind ohne
     // gespeicherte Stammdaten gesperrt – auf einem frischen Handy käme man sonst nie an
@@ -2379,7 +2446,7 @@ const App = (() => {
   // Zeigt unten auf der Startseite die installierte App-Version an. Autoritativ ist
   // die Cache-Version des laufenden Service Workers (per Nachricht abgefragt); solange
   // die noch nicht geantwortet hat, dient APP_VERSION als Sofort-Anzeige/Fallback.
-  const APP_VERSION = 'v83.15'; // Mit CACHE in sw.js ändern: v81 -> v82 nur bei neuen Funktionen (Doku), sonst v81.1, v81.2 …
+  const APP_VERSION = 'v84.6'; // Mit CACHE in sw.js ändern: v81 -> v82 nur bei neuen Funktionen (Doku), sonst v81.1, v81.2 …
   function renderAppVersion(v) {
     const el = $('#appVersion');
     if (!el) return;
@@ -2510,17 +2577,6 @@ const App = (() => {
   }
 
   // ----------------------------------------------------------- Übergabe (xlsx)
-  async function handoverExport() {
-    toast('Erzeuge Übergabe-Datei…');
-    try {
-      const name = await Handover.exportXlsx(currentJob);
-      toast('Übergabe exportiert: ' + name);
-    } catch (e) {
-      console.error(e);
-      toast('Übergabe-Export fehlgeschlagen: ' + (e.message || e));
-    }
-  }
-
   // Macht den übergebenen Auftrag zum aktuellen (nach Übergabe-/ZIP-Import).
   async function adoptJob(job) {
     currentJob = job;
@@ -2631,7 +2687,7 @@ const App = (() => {
     openInfoModal('Import nicht möglich',
       `<p>${escHtml(ursache)}</p>
        <p class="hint">Hilft das nicht weiter, schick den Fehlerbericht an Michael – dann ist klar, was passiert ist.</p>
-       <button type="button" class="btn" id="fehlerSendenBtn">📤 Fehlerbericht senden</button>
+       <button type="button" class="btn" id="fehlerSendenBtn">${Icon('share-2')} Fehlerbericht senden</button>
        <pre class="fehler-bericht">${escHtml(bericht)}</pre>`);
     $('#fehlerSendenBtn').onclick = () => fehlerberichtSenden(bericht);
   }
@@ -2727,18 +2783,18 @@ const App = (() => {
         .find((j) => j.id !== ziel.id && filialNr((j.header || {}).filiale) === nrPaket) || null;
       const optionen = [];
       if (vorhanden) {
-        optionen.push({ key: 'wechseln', emoji: '🔁',
+        optionen.push({ key: 'wechseln', icon: 'arrow-left-right',
           titel: `Zu Auftrag „${vorhanden.name || vorhanden.header.filiale}" wechseln`,
           sub: (zipImport ? 'Paket dort einlesen – Bilder und Stand kommen dazu' : 'Stand dort einlesen – Zähler kommen dazu')
             + ', nichts wird überschrieben. Dieser Auftrag bleibt unverändert.' });
       } else if (neuerAuftrag || paket.hatUebergabe) {
-        optionen.push({ key: 'neu', emoji: '🆕',
+        optionen.push({ key: 'neu', icon: 'circle-plus',
           titel: `Neuen Auftrag für Filiale ${nrPaket} anlegen`,
           sub: (zipImport ? 'Stammdaten, Bilder und Stand' : 'Stammdaten und Stand')
             + ' werden übernommen – Vorprüfung entfällt. Dieser Auftrag bleibt unverändert.' });
       }
       if (!neuerAuftrag) {
-        optionen.push({ key: 'aktuell', emoji: '⚠', cls: 'danger',
+        optionen.push({ key: 'aktuell', icon: 'triangle-alert', cls: 'danger',
           titel: 'Trotzdem in diesen Auftrag importieren',
           sub: zipImport
             ? `Fremde Bilder landen in der Dokumentation von ${nrEigen}`
@@ -2883,5 +2939,5 @@ const App = (() => {
   document.addEventListener('DOMContentLoaded', init);
 
   // Öffentlich für andere Module:
-  return { APP_VERSION, busy, animOpen, animClose, dreheChev, halteKopf, kopfNachOben, pop, toast, openInfoModal, openFormModal, openConfirm, shareFile, show, getCurrentJob, saveCurrentJob, adoptJob, filialNr, fehlerText };
+  return { APP_VERSION, sanft, busy, animOpen, animClose, dreheChev, halteKopf, kopfNachOben, pop, toast, openInfoModal, openFormModal, openConfirm, shareFile, show, getCurrentJob, saveCurrentJob, adoptJob, filialNr, fehlerText };
 })();
